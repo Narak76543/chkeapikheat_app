@@ -136,8 +136,16 @@ class SplitToolView(QWidget):
         )
 
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 8, 16)
+        page_layout = QHBoxLayout(page)
+        page_layout.setContentsMargins(0, 4, 0, 16)
+        page_layout.setSpacing(0)
+        page_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        # Centered One UI 9 Content Column (860px maximum width for elegant proportion)
+        center_col = QWidget()
+        center_col.setMaximumWidth(860)
+        layout = QVBoxLayout(center_col)
+        layout.setContentsMargins(8, 0, 8, 16)
         layout.setSpacing(12)
 
         # ── Tool Mode Switcher ──
@@ -195,6 +203,7 @@ class SplitToolView(QWidget):
 
         layout.addStretch(1)
 
+        page_layout.addWidget(center_col)
         scroll.setWidget(page)
         container_layout.addWidget(scroll)
         return container
@@ -636,8 +645,15 @@ class SplitToolView(QWidget):
 
     def _create_processing_page(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
+        page_layout = QHBoxLayout(page)
+        page_layout.setContentsMargins(0, 16, 0, 16)
+        page_layout.setSpacing(0)
+        page_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        center_col = QWidget()
+        center_col.setMaximumWidth(860)
+        layout = QVBoxLayout(center_col)
+        layout.setContentsMargins(8, 0, 8, 16)
         layout.setSpacing(10)
 
         proc_card = QFrame()
@@ -708,14 +724,23 @@ class SplitToolView(QWidget):
         proc_layout.addLayout(cancel_row)
         layout.addWidget(proc_card)
         layout.addStretch(1)
+
+        page_layout.addWidget(center_col)
         return page
 
     # ── Page 2: Completed State Creation ──
 
     def _create_completed_page(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
+        page_layout = QHBoxLayout(page)
+        page_layout.setContentsMargins(0, 16, 0, 16)
+        page_layout.setSpacing(0)
+        page_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        center_col = QWidget()
+        center_col.setMaximumWidth(860)
+        layout = QVBoxLayout(center_col)
+        layout.setContentsMargins(8, 0, 8, 16)
         layout.setSpacing(10)
 
         comp_card = QFrame()
