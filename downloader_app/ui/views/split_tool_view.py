@@ -803,6 +803,8 @@ class SplitToolView(QWidget):
         comp_layout.addLayout(actions_row)
         layout.addWidget(comp_card)
         layout.addStretch(1)
+
+        page_layout.addWidget(center_col)
         return page
 
     # ── Tool Mode Switching ──
