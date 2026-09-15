@@ -65,26 +65,33 @@ class SubtitleColorPickerDialog(QDialog):
     color_selected = pyqtSignal(str)
 
     PRESETS = [
-        ("#000000", "Solid Black"),
-        ("#121214", "Slate Charcoal"),
-        ("#0A0F1D", "Midnight Navy"),
-        ("#1E293B", "Dark Slate Blue"),
-        ("#1C130D", "Warm Espresso"),
-        ("#1E0F14", "Deep Burgundy"),
-        ("#0A1A12", "Forest Pine"),
-        ("#2A2A2E", "Graphite Grey"),
-        ("#475569", "Cool Slate"),
         ("#FFFFFF", "Pure White"),
+        ("#FACC15", "Vibrant Yellow"),
+        ("#F59E0B", "Amber Gold"),
+        ("#22D3EE", "Neon Cyan"),
+        ("#4ADE80", "Emerald Green"),
+        ("#F87171", "Coral Red"),
+        ("#A855F7", "Royal Purple"),
+        ("#000000", "Solid Black"),
+        ("#F1F5F9", "Frosted White"),
+        ("#1E293B", "Dark Slate Blue"),
     ]
 
-    def __init__(self, initial_color: str = "#000000", current_color: str | None = None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        initial_color: str = "#FFFFFF",
+        current_color: str | None = None,
+        title: str = "Color Picker",
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setModal(True)
 
+        self._dialog_title = title
         chosen_color = current_color if current_color is not None else initial_color
-        self._initial_color = chosen_color.upper() if QColor.isValidColor(chosen_color) else "#000000"
+        self._initial_color = chosen_color.upper() if QColor.isValidColor(chosen_color) else "#FFFFFF"
         self._current_color = self._initial_color
         self._preset_buttons: list[PresetSwatchButton] = []
 
@@ -115,7 +122,7 @@ class SubtitleColorPickerDialog(QDialog):
         self.lbl_title_icon.setFixedSize(20, 20)
         header.addWidget(self.lbl_title_icon)
 
-        self.lbl_title = QLabel("Subtitle Background Color")
+        self.lbl_title = QLabel(self._dialog_title)
         self.lbl_title.setStyleSheet("font-size: 14px; font-weight: 500;")
         header.addWidget(self.lbl_title, 1)
 

@@ -109,3 +109,35 @@ downloader_app/
 - Pause/resume/cancel work per row.
 - App survives closing mid-download (asks to confirm, cleans up).
 - `pytest` passes; `black --check` and `ruff` pass.
+
+---
+
+## 🔒 PERMANENT ARCHITECTURE RULES: TTS & TRANSCRIPT PIPELINE (DO NOT MODIFY)
+
+> **CRITICAL RULE FOR ALL FUTURE AGENTS:**
+> The current Speech-to-Text (STT) transcription and Text-to-Speech (TTS) voice dubbing engine is calibrated and approved as high quality by the user. **DO NOT change, refactor, or mangle the core logic below without explicit user request.**
+
+### 1. Text-to-Speech (TTS) Quality & Fidelity Rules
+- **100% Transcript Fidelity**: TTS input text must retain **100% of the original words, numbers, and phrasing**.
+- **Non-Destructive Sanitization**: `clean_text_for_tts` must only perform lightweight safety checks:
+  - Remove only trailing repeated dots (`...`, `....`) and XML characters (`<`, `>`) that cause Edge-TTS silence/crashes.
+  - **NEVER** strip words inside brackets/parentheses (`(word)`, `[number]`).
+  - **NEVER** replace all punctuation with flat Khmer periods `។` (this destroys natural speech intonation, questions, and emotion).
+- **Natural Human Cadence & Tempo**:
+  - Speech rate in Edge-TTS must stay natural (`+6%` to `+14%` base).
+  - FFmpeg `atempo` dynamic speed adjustments must NEVER exceed `1.20x` (never use aggressive chipmunk compression like `1.45x+`).
+- **Studio Vocal Mastering Chain**:
+  - Preserve the 6-band studio mastering filter chain (`highpass`, `lowshelf`, `equalizer`, `highshelf`, `acompressor`, `loudnorm=I=-16:TP=-1.5:LRA=7`).
+  - Preserve voice profiles for **Piseth (Male)**, **Sreymom (Female)**, **Sdach Game (+12% formant elevation)**, **Harvard (-30Hz deep documentary)**, and **Custom Voice Clone**.
+
+### 2. Audio Timeline Assembly & Seamless Transitions
+- **Acoustic Boundary Smoothing**: Keep `_apply_pcm_boundary_fades(clip_bytes, fade_frames=576)` (12ms smooth micro-fade envelope on 16-bit stereo PCM) to prevent boundary clicks and pops.
+- **Conversational Turn-Taking Gap**: Maintain a `100ms` natural breath gap between consecutive dialogue turns when shifting timestamps (`effective_start < last_clip_end_time + 0.10`).
+- **Smooth Background Ducking**: Keep `alimiter=limit=0.96:attack=7:release=120` to prevent background audio volume pumping during dialogue pauses.
+
+### 3. Subtitle Extraction & Multi-Model Translation
+- **Parallel Chunked Extraction**: 60s FFmpeg audio chunk slicing with `libmp3lame` and 24kHz clarity filter.
+- **Gemini Fallback Chain**: Keep the resilient multi-model failover chain (`gemini-2.5-flash`, `gemini-2.0-flash`, `gemini-1.5-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`, `gemini-3.7-flash`, `gemini-flash-latest`, followed by GTX fallback) for 100% zero-429 completion.
+
+### 4. Git Operations
+- **STRICT PROHIBITION**: **DO NOT run `git push`** under any circumstances unless explicitly commanded by the user.

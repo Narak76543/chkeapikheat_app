@@ -327,6 +327,10 @@ class DownloadWorker(QThread):
             "file_access_retries": 5,
             "concurrent_fragment_downloads": 4,
             "buffersize": 1024 * 1024,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["zh-Hans", "zh-Hant", "zh", "en", "km"],
+            "subtitlesformat": "srt",
             "http_headers": {
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

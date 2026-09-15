@@ -1,0 +1,38 @@
+﻿# 🔒 RULES: TTS & TRANSCRIPTION ARCHITECTURE PRESERVATION
+
+## CRITICAL INSTRUCTIONS FOR ALL AI AGENTS
+The Speech-to-Text (STT) transcription and Text-to-Speech (TTS) voice dubbing engine in this codebase is verified, approved, and loved by the user for its natural human cadence and expressiveness.
+
+**DO NOT MODIFY OR REFACTOR THE CORE ARCHITECTURE WITHOUT EXPLICIT USER INSTRUCTION.**
+
+---
+
+### 1. Text-to-Speech (TTS) Pipeline (downloader_app/core/tts_voxcpm.py)
+- **100% Transcript Word Preservation**: Never strip dialogue words or numbers inside brackets (...), [...], {...}, or quotes «...».
+- **Non-Destructive Text Sanitization (clean_text_for_tts)**:
+  - Only clean raw XML characters (<, >) and trailing repeated dots (..., ....) that crash Edge-TTS or cause silence.
+  - **DO NOT** replace all commas or punctuation with flat Khmer full stops ។. Preserving original punctuation keeps human emotion, questions, and natural speech inflection.
+- **Natural Human Cadence**:
+  - Edge-TTS speech rate should remain natural (+6% to +14%).
+  - tempo time-stretching must **NEVER exceed 1.20x**.
+- **Studio Vocal Mastering Filters**:
+  - Keep studio mastering chain (equalizer, highshelf, lowshelf, compressor, loudnorm=I=-16:TP=-1.5:LRA=7).
+  - Keep custom profiles: Piseth, Sreymom, Sdach Game, Harvard, and Voice Clone.
+
+---
+
+### 2. Multi-Track Timeline & Audio Splicing (downloader_app/core/dubbing_mixer.py)
+- **Acoustic Boundary Smoothing**: Maintain _apply_pcm_boundary_fades(clip_bytes, fade_frames=576) (12ms PCM micro-fade) to prevent digital pops or clicks at speech boundaries.
+- **Conversational Pacing**: Maintain 100ms turn-taking breath gap (effective_start < last_clip_end_time + 0.10).
+- **Smooth Ducking Limiter**: Maintain limiter=limit=0.96:attack=7:release=120 to prevent background volume pumping between lines.
+
+---
+
+### 3. Parallel Audio Extraction & Translation (downloader_app/core/subtitle_extractor.py, downloader_app/core/translator.py)
+- **Parallel Chunked Extraction**: 60-second audio slicing with FFmpeg libmp3lame + 24kHz clarity filter.
+- **Gemini Multi-Model Fallback Chain**: Keep active model failover pool (gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash, gemini-3.6-flash, gemini-3.5-flash-lite, gemini-3.7-flash, gemini-flash-latest, followed by GTX fallback).
+
+---
+
+### 4. Git Operations
+- **STRICT PROHIBITION**: **NEVER run git push** under any circumstances unless explicitly requested by the user.

@@ -7,6 +7,7 @@ with persistent local caching and non-blocking QThread execution.
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 import requests
@@ -269,8 +270,10 @@ class Translator:
             return clean_title
 
         models_to_try = [
-            "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
+            "gemini-3.1-flash-lite-preview",
+            "gemini-3-flash-preview",
+            "gemini-3.5-flash-lite",
             "gemini-3.6-flash",
             "gemini-3.7-flash",
             "gemini-flash-latest",
@@ -358,8 +361,10 @@ class Translator:
             return self._generate_fallback_suggestions(clean_t, target_lang=target_lang, count=count)
 
         models_to_try = [
-            "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
+            "gemini-3.1-flash-lite-preview",
+            "gemini-3-flash-preview",
+            "gemini-3.5-flash-lite",
             "gemini-3.6-flash",
             "gemini-3.7-flash",
             "gemini-flash-latest",
@@ -459,6 +464,7 @@ class Translator:
                 pct = float(done_count / total_count) * 100.0
                 if progress_callback:
                     progress_callback(pct, f"Translating dialogue ({done_count}/{total_count})...")
+                time.sleep(0.4)
             return results
 
         if progress_callback:
@@ -473,8 +479,10 @@ class Translator:
             return res
 
         models_to_try = [
-            "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
+            "gemini-3.1-flash-lite-preview",
+            "gemini-3-flash-preview",
+            "gemini-3.5-flash-lite",
             "gemini-3.6-flash",
             "gemini-3.7-flash",
             "gemini-flash-latest",
@@ -482,11 +490,13 @@ class Translator:
 
         prompt_lines = [
             "You are a master Cambodian movie dubbing director and translator into natural spoken Khmer (ភាសាខ្មែរ).",
-            f"Translate each line of dialogue into natural, dramatic spoken Khmer suitable for Cambodian voice actors.",
-            "CRITICAL REQUIREMENTS:",
+            "Translate each line of dialogue into natural, dramatic spoken Khmer suitable for Cambodian voice actors.",
+            "CRITICAL REQUIREMENTS FOR NATURAL MOVIE DUBBING:",
             "1. Output MUST be 100% written in authentic native Khmer script (អក្សរខ្មែរ, Unicode 1780-17FF).",
             "2. Absolutely NO Chinese characters (中文), Thai script (ภาษาไทย), Vietnamese, or other foreign words.",
-            "3. Maintain strict 1-to-1 numbered format (e.g. 1. text\\n2. text).",
+            "3. STRICT DUBBING TIME SYNCHRONIZATION: The translated Khmer dialogue MUST be concise and match the natural duration of the source line. NEVER use long flowery or redundant sentences. For short 1-4 word dialogue lines, use equally concise natural spoken Khmer phrases (e.g. '好' -> 'យល់ព្រម', '为什么' -> 'ហេតុអី?', '我知道了' -> 'ខ្ញុំដឹងហើយ') so voiceovers finish comfortably within their time slots without overflowing.",
+            "4. NATURAL CONVERSATIONAL TONE: Use natural spoken conversational Khmer words rather than formal or literal bookish translations.",
+            "5. Maintain strict 1-to-1 numbered format (e.g. 1. text\n2. text).",
             "Lines to translate:\n",
         ]
         for i, txt in enumerate(texts, start=1):
@@ -522,6 +532,12 @@ class Translator:
                                 trans_text = match.group(2).strip()
                                 # Clean any leftover markdown or asterisks
                                 trans_text = re.sub(r"^\*+|\*+$", "", trans_text).strip()
+                                # Strip any parenthetical translator commentary (e.g. "(ចំណាំ៖...)", "(រក្សាទុក...)", "(កែពី...)")
+                                trans_text = re.sub(r"\s*[\(（\[【][^\)）\]】]*?(?:រក្សាទុក|កែ|បន្ថែម|ដក|ប្ដូរ|ប្តូរ|ល្អ|ស្ដាប់|ស្តាប់|ធម្មជាតិ|បរិបទ|ចំណាំ|សម្គាល់|ពន្យល់|ឬ|note|keep|edit|change|context|meaning|like|sound|literally)[^\)）\]】]*?[\)）\]】]", "", trans_text, flags=re.IGNORECASE).strip()
+                                trans_text = re.sub(r"\s*[\(（\[【][^\)）\]】]+[\)）\]】]\s*$", "", trans_text).strip()
+                                trans_text = re.sub(r"[\(（\[【]\s*[\)）\]】]", "", trans_text).strip()
+                                # Normalize trailing punctuation, commas, semicolons, ellipses, and dots
+                                trans_text = re.sub(r"[\,\，\;\；\、\:\：\-\–\—\~\.．…\s]+$", "", trans_text).strip()
                                 if trans_text and is_valid_target_text(trans_text, target_lang):
                                     result_map[num] = trans_text
                                 elif trans_text:

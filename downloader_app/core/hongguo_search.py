@@ -156,6 +156,15 @@ def get_episode_stream_url(series_id: str, ep_index: int, vid: str) -> dict | No
             if not page_data or not page_data.get("video_player_info"):
                 continue
 
+            # Verify that the returned stream actually matches the requested VID.
+            # On Hongguo web, paywalled episodes (ep 4+) silently redirect to Episode 1.
+            ret_vid = page_data.get("vid")
+            if vid and ret_vid and str(ret_vid) != str(vid):
+                logger.info(
+                    f"Hongguo web episode {ep_index} (vid={vid}) is paywalled/locked (server returned vid={ret_vid})."
+                )
+                continue
+
             vinfo = page_data["video_player_info"]
             video_url = vinfo.get("main_url")
             if video_url:

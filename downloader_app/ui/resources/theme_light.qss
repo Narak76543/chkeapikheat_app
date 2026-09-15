@@ -511,7 +511,7 @@ QCheckBox::indicator:hover {
 QCheckBox::indicator:checked {
     background-color: #1259C3;
     border: 1.5px solid #1259C3;
-    image: none;
+    image: url({ICON_DIR}/check-white.svg);
 }
 
 /* Sidebar Rail */

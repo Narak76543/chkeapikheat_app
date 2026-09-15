@@ -113,7 +113,7 @@ class DownloadsView(QWidget):
         bottom_bar.addWidget(self.status_info_label)
         bottom_bar.addStretch()
 
-        self.developer_label = QLabel("Developer : Sarat Narak")
+        self.developer_label = QLabel("V1.1.0 BETA TEST | Developer : Sarat Narak")
         self.developer_label.setObjectName("metaLabel")
         bottom_bar.addWidget(self.developer_label)
 

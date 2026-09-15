@@ -123,8 +123,16 @@ def parse_srt_content(content: str) -> list[SubtitleItem]:
             text = " ".join(full_text_lines).strip()
             # Remove any leading stray index numbers
             text = re.sub(r"^\d+\s+", "", text).strip()
+            # Normalize trailing commas and stray punctuation
+            text = re.sub(r"[\,\，\;\；\、\s]+$", "", text).strip()
             if not text:
                 continue
+
+            try:
+                from downloader_app.core.grammar_corrector import clean_khmer_dialogue_typos
+                text = clean_khmer_dialogue_typos(text)
+            except Exception:
+                pass
 
             start_s = timestamp_to_seconds(start_raw)
             end_s = timestamp_to_seconds(end_raw)
@@ -166,6 +174,11 @@ def parse_srt_content(content: str) -> list[SubtitleItem]:
                 text = " ".join(text_lines).strip()
                 if not text:
                     continue
+                try:
+                    from downloader_app.core.grammar_corrector import clean_khmer_dialogue_typos
+                    text = clean_khmer_dialogue_typos(text)
+                except Exception:
+                    pass
                 start_sec = timestamp_to_seconds(start_str)
                 end_sec = timestamp_to_seconds(end_str)
                 if end_sec <= start_sec:
@@ -189,11 +202,17 @@ def parse_srt_content(content: str) -> list[SubtitleItem]:
 
 def format_srt_content(items: list[SubtitleItem]) -> str:
     """Formats a list of SubtitleItem objects back into an SRT string."""
+    try:
+        from downloader_app.core.grammar_corrector import clean_khmer_dialogue_typos
+    except ImportError:
+        clean_khmer_dialogue_typos = lambda t: t
+
     blocks = []
     for i, item in enumerate(items, start=1):
         start_ts = seconds_to_timestamp(item.start_seconds)
         end_ts = seconds_to_timestamp(item.end_seconds)
-        blocks.append(f"{i}\n{start_ts} --> {end_ts}\n{item.text}\n")
+        clean_text = clean_khmer_dialogue_typos(item.text) if item.text else ""
+        blocks.append(f"{i}\n{start_ts} --> {end_ts}\n{clean_text}\n")
     return "\n".join(blocks)
 
 
@@ -330,20 +349,24 @@ def _split_text_into_sentences(text: str) -> list[str]:
     if curr.strip():
         sentences.append(curr.strip())
 
-    # If a sentence is unusually long (> 45 chars) and has comma/clause delimiters, split further
+    # If a sentence is long (> 26 chars for CJK or > 45 chars for other scripts) and has comma/clause delimiters, split further
     final_sentences = []
     for s in sentences:
-        if len(s) > 45 and any(c in s for c in "，,;；、\t"):
+        is_cjk = any("\u4e00" <= c <= "\u9fff" for c in s)
+        max_clause_len = 26 if is_cjk else 45
+        if len(s) > max_clause_len and any(c in s for c in "，,;；、\t"):
             clause_parts = [p.strip() for p in re.split(r"([，,;；、\t]+)", s) if p.strip()]
             c_curr = ""
             for cp in clause_parts:
                 if re.match(r"^[，,;；、\t]+$", cp):
                     c_curr += cp
-                    if len(c_curr.strip()) > 12:
+                    min_chunk = 8 if is_cjk else 14
+                    if len(c_curr.strip()) > min_chunk:
                         final_sentences.append(c_curr.strip())
                         c_curr = ""
                 else:
-                    if c_curr.strip() and len(c_curr.strip()) > 12:
+                    min_chunk = 8 if is_cjk else 14
+                    if c_curr.strip() and len(c_curr.strip()) > min_chunk:
                         final_sentences.append(c_curr.strip())
                         c_curr = cp
                     else:
@@ -363,7 +386,8 @@ def _split_long_items(items: list[SubtitleItem], max_block_dur: float = 8.0) -> 
     for it in items:
         sentences = _split_text_into_sentences(it.text)
 
-        if len(sentences) > 1:
+        # Only split into separate items if each dialogue sentence has adequate speaking time (>= 1.5s each)
+        if len(sentences) > 1 and it.duration_seconds >= (len(sentences) * 1.5):
             total_dur = max(1.0, it.duration_seconds)
             total_chars = sum(max(1, len(s)) for s in sentences)
             curr_start = it.start_seconds
@@ -393,14 +417,18 @@ def _split_long_items(items: list[SubtitleItem], max_block_dur: float = 8.0) -> 
     return new_items
 
 
-_PREFERRED_STT_MODEL: str | None = "gemini-3.6-flash"
+_PREFERRED_STT_MODEL: str | None = "gemini-3.1-flash-lite"
 ACTIVE_STT_MODELS: list[str] = [
-    "gemini-3.6-flash",       # Best accuracy for Chinese STT (user verified)
-    "gemini-3.5-flash-lite",  # Fast fallback
-    "gemini-3.5-transcribe",  # Transcription-specialized fallback
-    "gemini-3.7-flash",       # High capability fallback
-    "gemini-3.1-flash-lite",  # Lightweight fallback
-    "gemini-flash-latest",    # Latest stable fallback
+    "gemini-3.1-flash-lite",       # Fast, high-accuracy multimodal STT with high available free-tier quota
+    "gemini-3.1-flash-lite-preview",# Stable fallback with fresh quota
+    "gemini-3-flash-preview",     # Alternate multimodal preview with fresh quota
+    "gemini-3.5-flash-lite",       # Standard flash-lite
+    "gemini-flash-lite-latest",   # Stable latest flash-lite
+    "gemini-3.5-flash",           # High capacity multimodal audio model
+    "gemini-3.6-flash",           # Next-gen high capacity flash
+    "gemini-flash-latest",        # Latest stable flash
+    "gemini-3.7-flash",           # Extended context model
+    "gemini-3.8-flash",           # Ultra-high capability multimodal
 ]
 
 
@@ -411,40 +439,39 @@ def _transcribe_audio_slice_with_gemini(
     total_chunks: int,
     start_sec: float,
 ) -> list[SubtitleItem]:
-    """Transcribes a single audio chunk (<= 150s) with Gemini AI using multi-model resilience."""
+    """Transcribes audio with Gemini AI using multi-model resilience, exponential backoff, and full-duration coverage."""
     global _PREFERRED_STT_MODEL, ACTIVE_STT_MODELS
     if not audio_bytes or not api_key:
         return []
 
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
     prompt = (
-        "You are a professional Chinese speech-to-text transcription specialist.\n"
-        "The audio track contains Chinese (Mandarin) spoken dialogue.\n"
-        "Your ONLY task is to transcribe what is spoken — do NOT translate.\n"
+        "You are an elite Chinese speech-to-text transcription engine for movie, drama, and video dialogue.\n"
+        "The audio contains Chinese (Mandarin) speech.\n"
+        "YOUR TASK: Transcribe EVERY SINGLE spoken sentence, dialogue turn, and character conversation with 100% completeness from the very start (00:00.00) to the very end of this audio.\n"
         "\n"
-        "Rules:\n"
-        "1. Output each spoken sentence or dialogue turn as actual Chinese characters (中文字幕).\n"
-        "2. Do NOT translate to Khmer, English, or any other language — only Chinese characters.\n"
-        "3. Break dialogue into natural short blocks of 2–6 seconds each.\n"
-        "4. Each block must be a complete, natural Chinese sentence or phrase.\n"
-        "5. Skip segments that are music, sound effects, or silence — output nothing for those.\n"
-        "6. Do NOT output bracket markers like [音乐], [笑声], [1], [♪] or any annotation.\n"
-        "7. Do NOT output timestamps beyond the actual length of this audio clip.\n"
-        "8. Output STRICTLY standard numbered SRT format:\n"
+        "CRITICAL RULES:\n"
+        "1. Transcribe ALL dialogue spoken by every actor/character across the entire audio duration. Do NOT stop transcribing early.\n"
+        "2. Transcribe in Simplified Chinese characters (中文字幕). Do NOT translate into English or Khmer.\n"
+        "3. Accurately capture dialogue turns with precise start and end timestamps matching the audio playback.\n"
+        "4. Break dialogue naturally into individual spoken lines (typically 1.5–6.0 seconds per line).\n"
+        "5. Do NOT skip fast dialogue, quiet speech, emotional shouts, or conversational responses.\n"
+        "6. Do NOT output annotations like [音乐], [笑声], [♪], [1], or descriptions of sounds.\n"
+        "7. Output STRICT standard numbered SRT format ONLY:\n"
         "   INDEX\n"
         "   HH:MM:SS,mmm --> HH:MM:SS,mmm\n"
         "   Chinese text\n"
         "\n"
         "Example:\n"
         "1\n"
-        "00:00:01,500 --> 00:00:04,200\n"
-        "你好，欢迎来到节目。\n"
+        "00:00:01,200 --> 00:00:03,800\n"
+        "你怎么现在才回来？\n"
         "\n"
         "2\n"
-        "00:00:05,100 --> 00:00:08,300\n"
-        "今天我们要讨论一个重要的话题。\n"
+        "00:00:04,100 --> 00:00:06,500\n"
+        "路上有点事情耽搁了。\n"
         "\n"
-        "Return ONLY the raw SRT text. No markdown, no explanations, no notes."
+        "Output ONLY raw numbered SRT format. No markdown codeblocks, no extra explanations."
     )
 
     payload = {
@@ -464,10 +491,10 @@ def _transcribe_audio_slice_with_gemini(
         "generationConfig": {
             "temperature": 0.0,
             "topP": 0.1,
+            "maxOutputTokens": 8192,
         },
     }
 
-    # Prioritize last successful model
     models_to_try = []
     if _PREFERRED_STT_MODEL and _PREFERRED_STT_MODEL in ACTIVE_STT_MODELS:
         models_to_try.append(_PREFERRED_STT_MODEL)
@@ -477,13 +504,13 @@ def _transcribe_audio_slice_with_gemini(
 
     for model_name in models_to_try:
         endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 logger.info(
-                    f"Sending audio chunk {chunk_index}/{total_chunks} ({len(audio_bytes) // 1024} KB) to Gemini ({model_name}, attempt {attempt+1})..."
+                    f"Sending audio segment {chunk_index}/{total_chunks} ({len(audio_bytes) // 1024} KB) to Gemini ({model_name}, attempt {attempt+1})..."
                 )
-                resp = requests.post(endpoint, json=payload, timeout=35)
-                logger.info(f"Gemini ({model_name}) chunk {chunk_index} response status: {resp.status_code}")
+                resp = requests.post(endpoint, json=payload, timeout=60)
+                logger.info(f"Gemini ({model_name}) segment {chunk_index} response status: {resp.status_code}")
 
                 if resp.status_code == 200:
                     _PREFERRED_STT_MODEL = model_name
@@ -497,40 +524,43 @@ def _transcribe_audio_slice_with_gemini(
                             srt_text = re.sub(r"\n?```$", "", srt_text).strip()
                             chunk_items = parse_srt_content(srt_text)
                             if chunk_items:
-                                # Offset by chunk start_sec
-                                for it in chunk_items:
-                                    it.start_seconds += start_sec
-                                    it.end_seconds += start_sec
-                                    it.start_time = seconds_to_timestamp(it.start_seconds)
-                                    it.end_time = seconds_to_timestamp(it.end_seconds)
+                                # Smart timestamp offset: only offset if timestamps are relative to segment start
+                                if start_sec > 0:
+                                    min_s = min(it.start_seconds for it in chunk_items)
+                                    if min_s < (start_sec * 0.5):
+                                        for it in chunk_items:
+                                            it.start_seconds += start_sec
+                                            it.end_seconds += start_sec
+                                            it.start_time = seconds_to_timestamp(it.start_seconds)
+                                            it.end_time = seconds_to_timestamp(it.end_seconds)
+
                                 logger.info(
-                                    f"Chunk {chunk_index}/{total_chunks} extracted {len(chunk_items)} lines from ({start_sec:.1f}s)."
+                                    f"Segment {chunk_index}/{total_chunks} extracted {len(chunk_items)} lines (from {start_sec:.1f}s to {chunk_items[-1].end_seconds:.1f}s)."
                                 )
                                 return chunk_items
                             else:
-                                logger.info(f"Chunk {chunk_index}/{total_chunks} returned no speech dialogue (ambient/music).")
+                                logger.info(f"Segment {chunk_index}/{total_chunks} returned no speech dialogue.")
                                 return []
                 elif resp.status_code in (404, 400):
                     logger.warning(
-                        f"Gemini model '{model_name}' unavailable/deprecated (HTTP {resp.status_code}). Removing from active pool."
+                        f"Gemini model '{model_name}' returned HTTP {resp.status_code}. Trying next model..."
                     )
-                    if model_name in ACTIVE_STT_MODELS:
-                        ACTIVE_STT_MODELS.remove(model_name)
                     break
                 elif resp.status_code in (429, 503):
+                    sleep_dur = 2.0 * (attempt + 1)
                     logger.warning(
-                        f"Gemini ({model_name}) busy/quota (HTTP {resp.status_code}). Waiting 1.0s before retry..."
+                        f"Gemini ({model_name}) busy/quota (HTTP {resp.status_code}). Waiting {sleep_dur:.1f}s before retry..."
                     )
-                    time.sleep(1.0)
+                    time.sleep(sleep_dur)
                     continue
                 else:
                     logger.warning(f"Gemini ({model_name}) error HTTP {resp.status_code}: {resp.text[:200]}")
                     break
             except requests.exceptions.Timeout:
-                logger.warning(f"Gemini ({model_name}) timed out on chunk {chunk_index}, trying next model...")
+                logger.warning(f"Gemini ({model_name}) timed out on segment {chunk_index}, trying next model...")
                 break
             except Exception as e:
-                logger.warning(f"Gemini ({model_name}) chunk {chunk_index} error: {e}")
+                logger.warning(f"Gemini ({model_name}) segment {chunk_index} error: {e}")
                 break
 
     return []
@@ -540,9 +570,10 @@ def transcribe_video_audio_to_subtitles(
     video_path: Path, target_lang: str = "km", progress_callback=None
 ) -> list[SubtitleItem]:
     """
-    Extracts audio in parallel time slices using FFmpeg, transcribes dialogue concurrently
-    with Gemini Multimodal AI, offsets timestamps, and returns a unified timed SubtitleItem list.
-    Handles any video length (from short clips to 2+ hour full movies) with high speed and zero timeouts.
+    Extracts audio using FFmpeg and transcribes Chinese speech dialogue with Gemini Multimodal AI.
+    For videos up to 8 minutes: transcribes in one seamless continuous audio stream to ensure 100% coverage
+    of every actor speak from beginning to the very last second without any chunk cutoffs.
+    For full movies (> 8 mins): uses large overlapping segments with rate-limit resilient execution.
     """
     from downloader_app.core.translator import get_api_key
     api_key = get_api_key()
@@ -556,80 +587,55 @@ def transcribe_video_audio_to_subtitles(
     total_dur = get_video_duration_ffmpeg(video_path)
     logger.info(f"Video total duration for speech transcription: {total_dur:.2f}s ({total_dur/60:.1f} mins)")
 
-    CHUNK_DURATION = 150.0  # 2.5 minutes per slice: optimal for Gemini fast STT & zero timeouts
     creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
-    if total_dur <= 0.0:
-        chunks = [(0.0, None)]
+    # Optimal segmentation strategy:
+    # 1. Videos <= 8 minutes (480s): 1 single continuous audio stream ensures 100% uninterrupted dialogue capture
+    # 2. Videos > 8 minutes: 240s (4 min) segments with 8s overlap to maintain speech continuity
+    if total_dur <= 480.0:
+        chunks = [(0.0, total_dur if total_dur > 0.0 else None)]
     else:
+        CHUNK_DURATION = 240.0
+        OVERLAP = 8.0
         chunks = []
         curr = 0.0
         while curr < total_dur:
             length = min(CHUNK_DURATION, total_dur - curr)
             chunks.append((curr, length))
-            curr += CHUNK_DURATION
+            curr += (CHUNK_DURATION - OVERLAP)
 
     total_chunks = len(chunks)
     if progress_callback:
-        progress_callback(15.0, f"Extracting audio into {total_chunks} segments...")
+        progress_callback(15.0, f"Extracting audio track ({total_chunks} segment{'s' if total_chunks > 1 else ''})...")
 
-    # Step 1: Rapidly extract full audio once (or slices directly) via FFmpeg
+    # Step 1: Rapidly extract high-clarity vocal audio via FFmpeg
     chunk_tasks = []
     temp_files = []
 
-    # First attempt single fast full-audio extraction
-    full_audio_temp = video_path.parent / f"{video_path.stem}_full_audio_temp.mp3"
-    temp_files.append(full_audio_temp)
-    full_cmd = [
-        ffmpeg_bin,
-        "-y",
-        "-i", str(video_path.resolve()),
-        "-vn",
-        "-ac", "1",
-        "-ar", "16000",
-        "-c:a", "libmp3lame",
-        "-b:a", "64k",
-        str(full_audio_temp.resolve()),
-    ]
-    subprocess.run(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creation_flags)
-
-    has_full_audio = full_audio_temp.exists() and full_audio_temp.stat().st_size > 0
-
     for chunk_idx, (chunk_start, chunk_len) in enumerate(chunks, start=1):
-        temp_chunk_mp3 = video_path.parent / f"{video_path.stem}_chunk_{chunk_idx}_{int(chunk_start)}s.mp3"
+        temp_chunk_mp3 = video_path.parent / f"{video_path.stem}_audio_seg_{chunk_idx}_{int(chunk_start)}s.mp3"
         temp_files.append(temp_chunk_mp3)
 
-        if has_full_audio and total_chunks > 1:
-            # Fast slicing directly from lightweight compressed audio file
-            cmd = [
-                ffmpeg_bin,
-                "-y",
-                "-ss", f"{chunk_start:.3f}",
-                "-i", str(full_audio_temp.resolve()),
-            ]
-            if chunk_len is not None:
-                cmd.extend(["-t", f"{chunk_len:.3f}"])
-            cmd.extend([
-                "-c", "copy",
-                str(temp_chunk_mp3.resolve()),
-            ])
-        else:
-            # Slicing directly from video
-            cmd = [
-                ffmpeg_bin,
-                "-y",
-                "-ss", f"{chunk_start:.3f}",
-                "-i", str(video_path.resolve()),
-            ]
-            if chunk_len is not None:
-                cmd.extend(["-t", f"{chunk_len:.3f}"])
-            cmd.extend([
-                "-vn",
-                "-ac", "1",
-                "-ar", "16000",
-                "-b:a", "64k",
-                str(temp_chunk_mp3.resolve()),
-            ])
+        cmd = [
+            ffmpeg_bin,
+            "-y",
+        ]
+        if chunk_start > 0:
+            cmd.extend(["-ss", f"{chunk_start:.3f}"])
+        cmd.extend([
+            "-i", str(video_path.resolve()),
+        ])
+        if chunk_len is not None and total_chunks > 1:
+            cmd.extend(["-t", f"{chunk_len:.3f}"])
+        cmd.extend([
+            "-vn",
+            "-af", "highpass=f=80,lowpass=f=8000,volume=1.3",
+            "-ac", "1",
+            "-ar", "24000",
+            "-c:a", "libmp3lame",
+            "-b:a", "96k",
+            str(temp_chunk_mp3.resolve()),
+        ])
 
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creation_flags)
 
@@ -646,7 +652,7 @@ def transcribe_video_audio_to_subtitles(
         except OSError:
             pass
 
-    # Step 2: Concurrent multi-threaded transcription with Gemini
+    # Step 2: Concurrent transcription with Gemini AI
     completed_chunks = 0
     total_valid_chunks = len(chunk_tasks)
     results_map: dict[int, list[SubtitleItem]] = {}
@@ -668,12 +674,12 @@ def transcribe_video_audio_to_subtitles(
                 pct = 20.0 + (completed_chunks / total_valid_chunks) * 65.0
                 progress_callback(
                     pct,
-                    f"Transcribing audio with AI ({completed_chunks}/{total_valid_chunks} chunks)...",
+                    f"Listening & transcribing dialogue ({completed_chunks}/{total_valid_chunks})...",
                 )
         return idx, items
 
-    max_workers = min(8, max(1, total_valid_chunks))
-    logger.info(f"Launching {total_valid_chunks} transcription tasks across {max_workers} concurrent threads...")
+    max_workers = min(3, max(1, total_valid_chunks))
+    logger.info(f"Launching {total_valid_chunks} transcription tasks across {max_workers} worker threads...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(_worker_task, t) for t in chunk_tasks]
         for f in concurrent.futures.as_completed(futures):
@@ -681,7 +687,7 @@ def transcribe_video_audio_to_subtitles(
                 c_idx, items = f.result()
                 results_map[c_idx] = items
             except Exception as e:
-                logger.warning(f"Error transcribing chunk: {e}")
+                logger.warning(f"Error transcribing segment: {e}")
 
     # Assemble in exact chronological order
     all_collected_items: list[SubtitleItem] = []
@@ -689,7 +695,7 @@ def transcribe_video_audio_to_subtitles(
         all_collected_items.extend(results_map[c_idx])
 
     if not all_collected_items:
-        logger.warning("No speech dialogue could be transcribed across any chunk.")
+        logger.warning("No speech dialogue could be transcribed across any segment.")
         return []
 
     # Sanitize, sort, re-index
@@ -697,8 +703,7 @@ def transcribe_video_audio_to_subtitles(
     for idx, it in enumerate(all_collected_items, start=1):
         it.index = idx
 
-    # ── Filter out non-speech artifacts: [1], [០], [♪], (music), standalone digits, etc.
-    # Also drop zero/micro duration entries (< 0.3s) which are always spurious
+    # Filter out non-speech noise artifacts
     before_filter = len(all_collected_items)
     all_collected_items = [
         it for it in all_collected_items
@@ -707,47 +712,16 @@ def transcribe_video_audio_to_subtitles(
     if len(all_collected_items) < before_filter:
         logger.info(f"Filtered {before_filter - len(all_collected_items)} noise/non-speech artifacts from transcript.")
 
-    # ── Normalize & auto-align dialogue timestamps to fit video duration ──────
+    # Clamp dialogue timestamps cleanly to video duration without distorting timeline
     if total_dur > 0 and all_collected_items:
-        min_start = all_collected_items[0].start_seconds
-        max_end = max((it.end_seconds for it in all_collected_items), default=0.0)
-
-        # If Gemini offset the entire dialogue (e.g. starting at 100s for a 60s clip)
-        if min_start >= (total_dur * 0.7) or (min_start > 20.0 and total_dur <= 180.0):
-            shift_amount = max(0.0, min_start - 0.8)
-            logger.info(
-                f"Auto-aligning timestamps: shifting dialogue start from {min_start:.1f}s to 0.8s (video duration {total_dur:.1f}s)"
-            )
-            for it in all_collected_items:
-                dur = it.duration_seconds
-                it.start_seconds = max(0.0, it.start_seconds - shift_amount)
-                it.end_seconds = it.start_seconds + dur
-                it.start_time = seconds_to_timestamp(it.start_seconds)
-                it.end_time = seconds_to_timestamp(it.end_seconds)
-
-        # If timestamps still exceed video duration, scale timestamps proportionally to fit video bounds
-        if all_collected_items and all_collected_items[-1].end_seconds > (total_dur * 1.05):
-            last_end = all_collected_items[-1].end_seconds
-            first_start = all_collected_items[0].start_seconds
-            current_span = max(1.0, last_end - first_start)
-            target_span = max(1.0, total_dur - first_start - 0.5)
-            scale_factor = target_span / current_span
-            if 0.15 < scale_factor < 1.0:
-                logger.info(f"Scaling dialogue timestamps by {scale_factor:.2f}x to fit video duration {total_dur:.1f}s")
-                for it in all_collected_items:
-                    rel_s = it.start_seconds - first_start
-                    rel_e = it.end_seconds - first_start
-                    it.start_seconds = first_start + (rel_s * scale_factor)
-                    it.end_seconds = first_start + (rel_e * scale_factor)
-                    it.start_time = seconds_to_timestamp(it.start_seconds)
+        cleaned_items = []
+        for it in all_collected_items:
+            if it.start_seconds < total_dur:
+                if it.end_seconds > total_dur:
+                    it.end_seconds = total_dur
                     it.end_time = seconds_to_timestamp(it.end_seconds)
-
-        # Final safety cleanup for any impossible outlier timestamp
-        max_allowed_ts = total_dur * 1.25 + 15.0
-        ts_before = len(all_collected_items)
-        all_collected_items = [it for it in all_collected_items if it.start_seconds <= max_allowed_ts]
-        if len(all_collected_items) < ts_before:
-            logger.info(f"Trimmed {ts_before - len(all_collected_items)} stray items beyond video bounds.")
+                cleaned_items.append(it)
+        all_collected_items = cleaned_items
 
     for idx, it in enumerate(all_collected_items, start=1):
         it.index = idx
@@ -780,6 +754,15 @@ def transcribe_video_audio_to_subtitles(
         translator = Translator()
         raw_texts = [it.text for it in items]
         translated_texts = translator.translate_subtitle_blocks(raw_texts, target_lang="km")
+
+        if target_lang == "km" and translated_texts:
+            if progress_callback:
+                progress_callback(93.0, f"Polishing & Correcting Khmer Grammar ({len(translated_texts)} lines)...")
+            try:
+                from downloader_app.core.grammar_corrector import correct_khmer_dialogue_grammar
+                translated_texts = correct_khmer_dialogue_grammar(translated_texts, progress_callback=progress_callback)
+            except Exception as e:
+                logger.warning(f"Khmer grammar correction step error: {e}")
 
         if len(translated_texts) > len(items) and len(items) > 0:
             logger.info(
@@ -945,14 +928,31 @@ class SubtitleExtractorWorker(QThread):
             except Exception as e:
                 logger.debug(f"Embedded subtitle extraction exception: {e}")
 
-        # Priority 3: check for sidecar .srt files in same folder (if sidecars are not ignored)
+        # Priority 3: check for sidecar subtitle files (.srt, .vtt) in same folder
         if not self.ignore_sidecar:
             self.progress_changed.emit(20.0, "Checking sidecar subtitle files...")
+            stem = self.video_path.stem
+            parent = self.video_path.parent
             candidates = [
-                self.video_path.parent / f"{self.video_path.stem}_KhmerDub.srt",
+                parent / f"{stem}_KhmerDub.srt",
                 self.video_path.with_suffix(".srt"),
-                self.video_path.parent / f"{self.video_path.stem}.km.srt",
+                parent / f"{stem}.km.srt",
+                parent / f"{stem}.zh-Hans.srt",
+                parent / f"{stem}.zh-Hant.srt",
+                parent / f"{stem}.zh.srt",
+                parent / f"{stem}.en.srt",
+                self.video_path.with_suffix(".vtt"),
+                parent / f"{stem}.zh-Hans.vtt",
+                parent / f"{stem}.zh-Hant.vtt",
+                parent / f"{stem}.zh.vtt",
+                parent / f"{stem}.en.vtt",
             ]
+            # Glob for any srt or vtt matching video stem
+            for ext_pattern in (f"{stem}*.srt", f"{stem}*.vtt"):
+                for matched in parent.glob(ext_pattern):
+                    if matched not in candidates:
+                        candidates.append(matched)
+
             for sidecar_srt in candidates:
                 if sidecar_srt.exists():
                     try:
@@ -960,11 +960,11 @@ class SubtitleExtractorWorker(QThread):
                             content = f.read()
                         items = parse_srt_content(content)
                         if items:
-                            self.progress_changed.emit(100.0, f"Sidecar subtitle file loaded ({sidecar_srt.name}).")
+                            self.progress_changed.emit(100.0, f"Sidecar subtitle loaded ({sidecar_srt.name}).")
                             self.finished.emit(items)
                             return
                     except OSError as e:
-                        logger.warning(f"Failed to read sidecar SRT {sidecar_srt.name}: {e}")
+                        logger.warning(f"Failed to read sidecar subtitle {sidecar_srt.name}: {e}")
 
         # Priority 4: Gemini AI Speech-to-Text — listens to the real spoken dialogue in the video
         # and returns a timed Khmer-translated SRT based on what humans actually say in the video.
@@ -995,3 +995,423 @@ class SubtitleExtractorWorker(QThread):
             "Please select a subtitle (.srt) file that matches this video's spoken dialogue, "
             "then try again."
         )
+
+
+def _parse_gemini_vision_fallback_lines(
+    raw_text: str,
+    interval_sec: float,
+    batch_start_idx: int,
+    batch_size: int,
+) -> list[SubtitleItem]:
+    """
+    Fallback parser when Gemini Vision AI outputs list-style, bulleted, or conversational frames
+    instead of strict SRT format.
+    """
+    if not raw_text or not raw_text.strip():
+        return []
+
+    from downloader_app.core.translator import has_cjk
+
+    items: list[SubtitleItem] = []
+    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+
+    frame_pat = re.compile(r"Frame\s*#?\s*(\d+).*?[:\-]\s*(.*)", re.IGNORECASE)
+    ts_pat = re.compile(r"\[?(\d{1,2}:\d{2}(?::\d{2})?(?:[\.,]\d{1,3})?)\]?[\s:\-]+(.*)")
+
+    for line in lines:
+        m_frame = frame_pat.search(line)
+        if m_frame:
+            f_num = int(m_frame.group(1))
+            txt = m_frame.group(2).strip()
+            txt = re.sub(r"^\*+|\*+$", "", txt).strip()
+            if txt and has_cjk(txt) and not txt.lower().startswith("none") and not txt.lower().startswith("no subtitle"):
+                t_sec = (f_num - 1) * interval_sec
+                items.append(SubtitleItem(
+                    index=len(items) + 1,
+                    start_time=seconds_to_timestamp(t_sec),
+                    end_time=seconds_to_timestamp(t_sec + interval_sec),
+                    start_seconds=t_sec,
+                    end_seconds=t_sec + interval_sec,
+                    text=txt,
+                ))
+            continue
+
+        m_ts = ts_pat.search(line)
+        if m_ts:
+            ts_str = m_ts.group(1).strip()
+            txt = m_ts.group(2).strip()
+            txt = re.sub(r"^\*+|\*+$", "", txt).strip()
+            if txt and has_cjk(txt):
+                t_sec = timestamp_to_seconds(ts_str)
+                items.append(SubtitleItem(
+                    index=len(items) + 1,
+                    start_time=seconds_to_timestamp(t_sec),
+                    end_time=seconds_to_timestamp(t_sec + interval_sec),
+                    start_seconds=t_sec,
+                    end_seconds=t_sec + interval_sec,
+                    text=txt,
+                ))
+            continue
+
+    if not items:
+        valid_cjk_lines = []
+        for line in lines:
+            cleaned = re.sub(r"^[\*\-\d\.\)\s]+", "", line).strip()
+            cleaned = re.sub(r"^\*+|\*+$", "", cleaned).strip()
+            if cleaned and has_cjk(cleaned) and len(cleaned) <= 60:
+                valid_cjk_lines.append(cleaned)
+
+        if valid_cjk_lines:
+            for idx, cjk_txt in enumerate(valid_cjk_lines):
+                t_sec = (batch_start_idx + idx) * interval_sec
+                items.append(SubtitleItem(
+                    index=len(items) + 1,
+                    start_time=seconds_to_timestamp(t_sec),
+                    end_time=seconds_to_timestamp(t_sec + interval_sec),
+                    start_seconds=t_sec,
+                    end_seconds=t_sec + interval_sec,
+                    text=cjk_txt,
+                ))
+
+    return items
+
+
+def extract_subtitles_via_vision_ocr(
+    video_path: Path,
+    target_lang: str = "km",
+    crop_box_ratio: tuple[float, float, float, float] | None = None,
+    progress_callback=None,
+) -> list[SubtitleItem]:
+    """
+    Extracts hardcoded Chinese subtitles directly from video screen frames using FFmpeg crop + Gemini Vision AI.
+    Ideal for short dramas (抖音短剧) and 1h-3h movies with burned-in subtitles.
+    """
+    import tempfile
+    import shutil
+    from downloader_app.core.translator import get_api_key, Translator, has_cjk
+
+    api_key = get_api_key()
+    ffmpeg_bin = get_ffmpeg_path()
+    if not api_key or not ffmpeg_bin or not video_path.exists():
+        logger.warning("Vision OCR failed: missing API key, FFmpeg, or video path.")
+        return []
+
+    if progress_callback:
+        progress_callback(5.0, "Analyzing video duration for Vision OCR...")
+
+    total_dur = get_video_duration_ffmpeg(video_path)
+    if total_dur <= 0.0:
+        total_dur = 600.0
+
+    # Determine frame sampling interval based on video duration
+    # Tight 1.0s - 1.25s intervals ensure no fast-spoken Chinese dialogue is skipped and timestamps align accurately
+    if total_dur <= 1800.0:
+        interval_sec = 1.0
+    elif total_dur <= 3600.0:
+        interval_sec = 1.25
+    else:
+        interval_sec = 1.5
+
+    fps_val = 1.0 / interval_sec
+
+    # Default crop box: bottom 40% region [x_ratio, y_ratio, w_ratio, h_ratio]
+    # Covers y from 0.58 to 0.98 so subtitles in vertical (Douyin/Reels) and horizontal videos are fully captured
+    if not crop_box_ratio:
+        crop_box_ratio = (0.01, 0.58, 0.98, 0.40)
+
+    x_ratio, y_ratio, w_ratio, h_ratio = crop_box_ratio
+    crop_filter = f"crop=in_w*{w_ratio:.3f}:in_h*{h_ratio:.3f}:in_w*{x_ratio:.3f}:in_h*{y_ratio:.3f},fps={fps_val:.4f}"
+
+    if progress_callback:
+        progress_callback(10.0, "Sampling subtitle region frames from video...")
+
+    creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+    with tempfile.TemporaryDirectory(prefix="sub_ocr_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        out_pattern = str(tmp_dir / "frame_%05d.jpg")
+
+        cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-ss",
+            "0",
+            "-i",
+            str(video_path.resolve()),
+            "-vf",
+            crop_filter,
+            "-q:v",
+            "3",
+            out_pattern,
+        ]
+
+        try:
+            res = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=creation_flags,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=max(300, int(total_dur * 0.25)),
+            )
+        except Exception as e:
+            logger.error(f"FFmpeg frame extraction error for Vision OCR: {e}")
+            return []
+
+        frame_files = sorted(tmp_dir.glob("frame_*.jpg"))
+        if not frame_files:
+            logger.warning("No frame images extracted for Vision OCR.")
+            return []
+
+        total_frames = len(frame_files)
+        logger.info(f"Extracted {total_frames} cropped frame snapshots for Vision OCR.")
+
+        if progress_callback:
+            progress_callback(30.0, f"Scanning {total_frames} frames with Gemini Vision AI...")
+
+        # Batch frames (15 frames per batch) to Gemini Vision API
+        BATCH_SIZE = 15
+        all_ocr_items: list[SubtitleItem] = []
+        had_quota_error = False
+
+        for batch_start_idx in range(0, total_frames, BATCH_SIZE):
+            batch_files = frame_files[batch_start_idx : batch_start_idx + BATCH_SIZE]
+            parts = []
+
+            for i, fpath in enumerate(batch_files):
+                frame_idx = batch_start_idx + i + 1
+                t_sec = (frame_idx - 1) * interval_sec
+                t_str = seconds_to_timestamp(t_sec)
+
+                # Smooth 1-by-1 frame progress feedback
+                pct = 30.0 + ((frame_idx - 1) / total_frames) * 50.0
+                if progress_callback:
+                    progress_callback(pct, f"OCR Scanning frame {frame_idx} of {total_frames} ({t_str[:8]})")
+                time.sleep(0.015)
+
+                try:
+                    with open(fpath, "rb") as img_f:
+                        img_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+
+                    parts.append(
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": img_b64,
+                            }
+                        }
+                    )
+                    parts.append({"text": f"Frame #{frame_idx} (Timestamp: {t_str})"})
+                except OSError as e:
+                    logger.warning(f"Failed to read frame image {fpath.name}: {e}")
+
+            if not parts:
+                continue
+
+            prompt = (
+                "YOUR TASK: Perform high-accuracy OCR on the hardcoded Chinese subtitles shown in these sequential video frame images.\n"
+                "CRITICAL REQUIREMENTS FOR 100% TIMING ACCURACY:\n"
+                "1. Examine EVERY frame carefully in chronological order. Do NOT skip any frame with Chinese subtitle text.\n"
+                "2. For each subtitle line, use the timestamp of the FIRST frame it appears as the start time, and the timestamp of the LAST frame it is visible as the end time.\n"
+                "3. If a subtitle is visible in only a single frame at timestamp T, set start time to T and end time to T + 1.5s.\n"
+                "4. Output STRICT standard numbered SRT format ONLY:\n"
+                "   INDEX\n"
+                "   HH:MM:SS,mmm --> HH:MM:SS,mmm\n"
+                "   Exact Chinese subtitle text\n\n"
+                "Output pure numbered SRT format ONLY. No extra text, explanation, or markdown."
+            )
+            parts.append({"text": prompt})
+
+            payload = {
+                "contents": [{"parts": parts}],
+                "generationConfig": {
+                    "temperature": 0.0,
+                    "topP": 0.1,
+                    "maxOutputTokens": 8192,
+                },
+            }
+
+            cur_last_frame = min(total_frames, batch_start_idx + len(batch_files))
+            pct = 30.0 + (cur_last_frame / total_frames) * 50.0
+            if progress_callback:
+                progress_callback(pct, f"OCR Scanning frame {cur_last_frame} of {total_frames}...")
+
+            batch_succeeded = False
+            for retry_attempt in range(4):
+                for model_name in ACTIVE_STT_MODELS:
+                    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                    try:
+                        resp = requests.post(endpoint, json=payload, timeout=60)
+                        if resp.status_code == 200:
+                            cands = resp.json().get("candidates", [])
+                            if cands:
+                                res_parts = cands[0].get("content", {}).get("parts", [])
+                                if res_parts:
+                                    raw_text = res_parts[0].get("text", "").strip()
+                                    raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)
+                                    raw_text = re.sub(r"\n?```$", "", raw_text).strip()
+                                    batch_items = parse_srt_content(raw_text)
+                                    if not batch_items:
+                                        batch_items = _parse_gemini_vision_fallback_lines(
+                                            raw_text=raw_text,
+                                            interval_sec=interval_sec,
+                                            batch_start_idx=batch_start_idx,
+                                            batch_size=len(batch_files),
+                                        )
+                                    if batch_items:
+                                        all_ocr_items.extend(batch_items)
+                                    batch_succeeded = True
+                                    break
+                        elif resp.status_code == 429:
+                            had_quota_error = True
+                            logger.warning(f"Vision OCR model '{model_name}' rate limited (HTTP 429 Quota Exceeded), trying next model...")
+                            time.sleep(1.5)
+                            continue
+                        elif resp.status_code in (500, 503):
+                            logger.warning(f"Vision OCR model '{model_name}' temporary server error (HTTP {resp.status_code}), retrying...")
+                            time.sleep(2.0)
+                            continue
+                        else:
+                            logger.warning(f"Vision OCR model '{model_name}' returned HTTP {resp.status_code}: {resp.text[:100]}")
+                    except Exception as e:
+                        logger.warning(f"Vision OCR batch error on model {model_name}: {e}")
+                        continue
+
+                if batch_succeeded:
+                    break
+                if had_quota_error and retry_attempt < 3:
+                    backoff_sec = 4.0 * (retry_attempt + 1)
+                    if progress_callback:
+                        progress_callback(pct, f"Rate limit reached, pausing {int(backoff_sec)}s before retrying batch {batch_start_idx//BATCH_SIZE + 1}...")
+                    time.sleep(backoff_sec)
+                else:
+                    break
+
+            # Pacing delay between batches to stay within free-tier API rate limits
+            time.sleep(1.0)
+
+        if not all_ocr_items:
+            if had_quota_error:
+                raise RuntimeError(
+                    "Gemini AI API Quota Exceeded (HTTP 429 Rate Limit).\n\n"
+                    "Your Gemini API free-tier request quota was temporarily reached. "
+                    "Please wait 30-60 seconds, or configure an alternate/paid API key in Settings."
+                )
+            logger.warning("No subtitle text extracted from frames via Vision OCR.")
+            return []
+
+        # Sort items chronologically by start time
+        all_ocr_items.sort(key=lambda x: x.start_seconds)
+
+        # Merge duplicate consecutive items with gap and overlap constraints
+        merged_items: list[SubtitleItem] = []
+        for item in all_ocr_items:
+            clean_txt = item.text.strip()
+            if not clean_txt:
+                continue
+            if not merged_items:
+                merged_items.append(item)
+            else:
+                last = merged_items[-1]
+                # Merge if identical text AND gap between last end and item start is small (<= 1.5 * interval_sec)
+                if last.text.strip() == clean_txt and (item.start_seconds - last.end_seconds) <= (interval_sec * 1.5):
+                    last.end_seconds = max(last.end_seconds, item.end_seconds)
+                    last.end_time = seconds_to_timestamp(last.end_seconds)
+                else:
+                    # Prevent overlap: clamp last.end_seconds if it spills into item.start_seconds
+                    if item.start_seconds < last.end_seconds:
+                        last.end_seconds = max(last.start_seconds + 0.6, item.start_seconds)
+                        last.end_time = seconds_to_timestamp(last.end_seconds)
+                    item.index = len(merged_items) + 1
+                    merged_items.append(item)
+
+        if progress_callback:
+            progress_callback(85.0, f"Translating {len(merged_items)} OCR subtitles into Khmer...")
+
+        # Translate extracted Chinese subtitles into Khmer
+        translator = Translator()
+        raw_texts = [it.text for it in merged_items]
+        translated_texts = translator.translate_subtitle_blocks(raw_texts, target_lang=target_lang)
+
+        if target_lang == "km" and translated_texts:
+            if progress_callback:
+                progress_callback(90.0, f"Polishing & Correcting Khmer Grammar ({len(translated_texts)} lines)...")
+            try:
+                from downloader_app.core.grammar_corrector import correct_khmer_dialogue_grammar, clean_khmer_dialogue_typos
+                translated_texts = correct_khmer_dialogue_grammar(translated_texts, progress_callback=progress_callback)
+            except Exception as e:
+                logger.warning(f"Khmer grammar correction step error: {e}")
+
+        from downloader_app.core.grammar_corrector import clean_khmer_dialogue_typos
+        translated_items = []
+        for idx, (it, tr_text) in enumerate(zip(merged_items, translated_texts), start=1):
+            it.index = idx
+            it.text = clean_khmer_dialogue_typos(tr_text)
+            translated_items.append(it)
+
+        # Save sidecar SRT file
+        out_srt_path = video_path.parent / f"{video_path.stem}_KhmerDub.srt"
+        try:
+            srt_lines = []
+            for it in translated_items:
+                srt_lines.append(f"{it.index}\n{it.start_time} --> {it.end_time}\n{it.text}\n")
+            with open(out_srt_path, "w", encoding="utf-8") as sf:
+                sf.write("\n".join(srt_lines))
+            logger.info(f"Saved Vision OCR Khmer subtitle file to {out_srt_path.name}")
+        except OSError as e:
+            logger.warning(f"Failed to write Vision OCR sidecar SRT: {e}")
+
+        if progress_callback:
+            progress_callback(100.0, f"Vision OCR complete! Extracted {len(translated_items)} dialogue items.")
+
+        return translated_items
+
+
+class SubtitleOCRWorker(QThread):
+    """
+    Background worker thread that runs Vision AI OCR frame scanning on videos
+    and emits results to the UI.
+    """
+    finished = pyqtSignal(list)
+    progress_changed = pyqtSignal(float, str)
+    error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        video_path: str | Path,
+        crop_box_ratio: tuple[float, float, float, float] | None = None,
+        target_lang: str = "km",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.video_path = Path(video_path)
+        self.crop_box_ratio = crop_box_ratio
+        self.target_lang = target_lang
+
+    def run(self) -> None:
+        try:
+            def _on_progress(pct: float, msg: str):
+                self.progress_changed.emit(pct, msg)
+
+            items = extract_subtitles_via_vision_ocr(
+                video_path=self.video_path,
+                target_lang=self.target_lang,
+                crop_box_ratio=self.crop_box_ratio,
+                progress_callback=_on_progress,
+            )
+            if items:
+                self.finished.emit(items)
+            else:
+                self.error.emit(
+                    "No hardcoded Chinese subtitles could be extracted from video frames via Vision OCR.\n\n"
+                    "Please ensure the subtitle crop box covers the written text on screen, then try again."
+                )
+        except RuntimeError as e:
+            logger.warning(f"SubtitleOCRWorker quota/runtime error: {e}")
+            self.error.emit(str(e))
+        except Exception as e:
+            logger.error(f"SubtitleOCRWorker exception: {e}")
+            self.error.emit(f"Vision OCR Subtitle Extraction error: {e}")
+

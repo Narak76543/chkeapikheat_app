@@ -142,6 +142,7 @@ class MovieMetadataFetcherWorker(QThread):
             tags = top_match.get("tags", [])
 
         duration_mins = int(total_eps * 2.0) if total_eps > 0 else 90
+        raw_url = f"https://hongguoduanju.com/detail?series_id={series_id}" if series_id else ""
 
         return {
             "series_id": series_id,
@@ -154,6 +155,7 @@ class MovieMetadataFetcherWorker(QThread):
             "intro": intro,
             "tags": tags,
             "source": "hongguo",
+            "raw_url": raw_url,
             "matches": dramas[:5],
         }
 
@@ -361,6 +363,19 @@ class FullMovieResolverWorker(QThread):
             elif stem and stem in clean_t:
                 score += 50
 
+            # Loop detection & anti-fake penalties:
+            # Fake loop videos on YouTube typically say '循环', 'loop', '4小时', '5小时', '4 hours', 'repeat'
+            lower_title = item_title.lower()
+            if any(term in lower_title or term in clean_t for term in ["循环", "loop", "repeat", "4小时", "5小时", "6小时", "4 hours", "5 hours", "6 hours"]):
+                score -= 150
+
+            # Short drama full movies are usually 50 to 140 minutes (1h - 2.3h)
+            # Videos longer than 180 minutes (3 hours) for short dramas are almost universally fake loops
+            if dur_mins > 180:
+                score -= 80
+            elif 50 <= dur_mins <= 140:
+                score += 30
+
             if expected_mins > 0 and dur_mins > 0:
                 diff = abs(dur_mins - expected_mins)
                 if diff <= 30:
@@ -369,6 +384,8 @@ class FullMovieResolverWorker(QThread):
                     score += 30
                 elif dur_mins < expected_mins * 0.5:
                     score -= 40
+                elif dur_mins > expected_mins * 1.8:
+                    score -= 60
             elif dur_mins > 30:
                 score += 20
 

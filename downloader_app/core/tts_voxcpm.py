@@ -41,6 +41,53 @@ def get_audio_duration_ffmpeg(file_path: Path, ffmpeg_bin: str) -> float:
     return 0.0
 
 
+def clean_text_for_tts(text: str) -> str:
+    """
+    Lightweight, non-destructive sanitizer for TTS input text.
+    Preserves 100% of original words, natural intonation, and phrasing while
+    safely cleaning trailing ellipsis ('...', '....') and XML characters (<, >) that cause TTS errors.
+    Strips placeholder text like '(គ្មានទិន្នន័យ)', '[គ្មានទិន្នន័យ]', '(No Data)', '(无数据)' so the AI voice NEVER speaks them.
+    """
+    if not text:
+        return ""
+    t = text.strip()
+
+    no_data_patterns = [
+        r"គ្មានទិន្នន័យ",
+        r"no\s*data",
+        r"无数据",
+        r"暂无数据",
+        r"nodata",
+    ]
+
+    # Check if text is purely a "no data" placeholder (with or without brackets/parentheses)
+    clean_lower = t.lower()
+    for pat in no_data_patterns:
+        if re.search(r"^\s*[\(\[\（\【\s]*" + pat + r"[\)\]\）\】\s]*$", clean_lower):
+            return ""
+
+    # Strip inline parenthesized/bracketed "no data" annotations e.g. (គ្មានទិន្នន័យ), [no data], (无数据)
+    for pat in no_data_patterns:
+        t = re.sub(r"[\(\[\（\【]\s*" + pat + r"\s*[\)\]\）\】]", " ", t, flags=re.IGNORECASE)
+        t = re.sub(pat, " ", t, flags=re.IGNORECASE)
+
+    # Strip XML tags / angle brackets that break SSML synthesis
+    t = re.sub(r"<[^>]*>", " ", t)
+    t = re.sub(r"[<>]", " ", t)
+    # Remove repeated inline dots/ellipses ('....' -> ' ')
+    t = re.sub(r"[\.．…]{2,}", " ", t)
+    # Remove trailing repeated dots/ellipses and trailing commas
+    t = re.sub(r"[\.．…\s]+$", "", t)
+    t = re.sub(r"[\,\，\;\；\s]+$", "", t)
+    # Clean whitespace
+    res = re.sub(r"\s+", " ", t).strip()
+
+    for pat in no_data_patterns:
+        if re.search(r"^\s*[\(\[\（\【\s]*" + pat + r"[\)\]\）\】\s]*$", res.lower()):
+            return ""
+    return res
+
+
 _voice_profile_cache: dict[str, dict] = {}
 
 
@@ -169,7 +216,9 @@ class VoxCPM2Client:
         then Google Khmer TTS, then timed audio generator.
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        text_clean = text.strip()
+        text_clean = clean_text_for_tts(text)
+        if not text_clean:
+            return self._generate_fallback_audio(max(1.0, max_allowed_duration or duration_sec), output_path)
 
         # Safeguard: If target is Khmer but text contains Chinese characters (e.g. translation missed),
         # translate it on-the-fly so it NEVER speaks Chinese!
@@ -236,8 +285,8 @@ class VoxCPM2Client:
 
             import base64
             gemini_models = [
-                "models/gemini-2.5-flash-preview-tts",
                 "models/gemini-3.1-flash-tts-preview",
+                "models/gemini-2.5-flash-preview-tts",
             ]
 
             text_clean = text.strip()
@@ -329,7 +378,7 @@ class VoxCPM2Client:
         Dynamically adjusts tempo within natural human limits, synthesizes pitch natively, and
         applies studio mastering filters for pristine vocal clarity and warmth.
         """
-        text_clean = text.strip()
+        text_clean = clean_text_for_tts(text)
         if not text_clean:
             return self._generate_fallback_audio(max(1.0, max_allowed_duration), output_path)
 
@@ -531,9 +580,13 @@ class VoxCPM2Client:
     def _generate_online_khmer_tts(
         self, text: str, output_path: Path, max_allowed_duration: float = 0.0
     ) -> bool:
+        text_clean = clean_text_for_tts(text)
+        if not text_clean:
+            return False
+
         # Under NO circumstance should Chinese characters be passed to Khmer TTS
-        if re.search(r"[\u4e00-\u9fff]", text.strip()):
-            logger.warning(f"Skipping online Google TTS for Chinese text: '{text[:20]}...'")
+        if re.search(r"[\u4e00-\u9fff]", text_clean):
+            logger.warning(f"Skipping online Google TTS for Chinese text: '{text_clean[:20]}...'")
             return False
 
         import urllib.parse
@@ -543,7 +596,7 @@ class VoxCPM2Client:
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
         }
-        chunks = [text[i:i+100] for i in range(0, len(text), 100)]
+        chunks = [text_clean[i:i+100] for i in range(0, len(text_clean), 100)]
         combined_audio = bytearray()
 
         try:

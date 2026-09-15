@@ -196,7 +196,47 @@ class SplitToolView(QWidget):
         layout.addStretch(1)
 
         scroll.setWidget(page)
-        container_layout.addWidget(scroll)
+        container_layout.addWidget(scroll, 1)
+
+        # ── Docked Bottom Action Bar (Permanently visible, never pushed off-screen) ──
+        self.bottom_bar = QFrame()
+        self.bottom_bar.setObjectName("bottomActionBar")
+        is_dark = get_theme() == "dark"
+        border_col = "rgba(255, 255, 255, 0.1)" if is_dark else "#E5E5EA"
+        self.bottom_bar.setStyleSheet(
+            f"QFrame#bottomActionBar {{ background-color: transparent; border-top: 1px solid {border_col}; }}"
+        )
+        bottom_layout = QHBoxLayout(self.bottom_bar)
+        bottom_layout.setContentsMargins(0, 8, 0, 0)
+        bottom_layout.setSpacing(12)
+
+        self.lbl_bottom_info = QLabel()
+        self.lbl_bottom_info.setObjectName("metaLabel")
+        self.lbl_bottom_info.setStyleSheet("font-size: 11.5px;")
+        bottom_layout.addWidget(self.lbl_bottom_info, 1)
+
+        self.btn_split = QPushButton(tr("start_splitting"))
+        self.btn_split.setObjectName("primaryButton")
+        self.btn_split.setIcon(get_icon("scissors", color="#FFFFFF", size=15))
+        self.btn_split.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_split.setStyleSheet(
+            "padding: 0 24px; min-height: 38px; font-weight: 500; font-size: 13px; border-radius: 19px; color: #FFFFFF;"
+        )
+        self.btn_split.clicked.connect(self._on_split_clicked)
+        bottom_layout.addWidget(self.btn_split)
+
+        self.btn_start_batch = QPushButton(tr("start_batch_rename"))
+        self.btn_start_batch.setObjectName("primaryButton")
+        self.btn_start_batch.setIcon(get_icon("rotate-cw", color="#FFFFFF", size=15))
+        self.btn_start_batch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_start_batch.setStyleSheet(
+            "padding: 0 24px; min-height: 38px; font-weight: 500; font-size: 13px; border-radius: 19px; color: #FFFFFF;"
+        )
+        self.btn_start_batch.clicked.connect(self._on_start_batch_rename_clicked)
+        self.btn_start_batch.setVisible(False)
+        bottom_layout.addWidget(self.btn_start_batch)
+
+        container_layout.addWidget(self.bottom_bar)
         return container
 
     def _create_splitter_container(self) -> QWidget:
@@ -461,8 +501,7 @@ class SplitToolView(QWidget):
 
         # Auto-append title toggle checkbox row
         self.chk_auto_append = QCheckBox(tr("use_generated_title_in_path"))
-        self.chk_auto_append.setObjectName("metaLabel")
-        self.chk_auto_append.setStyleSheet("font-size: 11.5px;")
+        self.chk_auto_append.setStyleSheet("font-size: 12px; padding: 2px 0;")
         self.chk_auto_append.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chk_auto_append.setChecked(False)
         self.chk_auto_append.toggled.connect(self._on_auto_append_toggled)
@@ -472,34 +511,24 @@ class SplitToolView(QWidget):
         self.naming_preview_card = QFrame()
         self.naming_preview_card.setObjectName("settingsGroupCard")
         preview_layout = QVBoxLayout(self.naming_preview_card)
-        preview_layout.setContentsMargins(10, 8, 10, 8)
+        preview_layout.setContentsMargins(12, 8, 12, 8)
         preview_layout.setSpacing(4)
 
         self.lbl_preview_title = QLabel(tr("naming_preview"))
         self.lbl_preview_title.setObjectName("metaLabel")
-        self.lbl_preview_title.setStyleSheet("font-size: 10.5px; font-weight: 400;")
+        self.lbl_preview_title.setStyleSheet("font-size: 11px; font-weight: 500;")
         preview_layout.addWidget(self.lbl_preview_title)
 
         self.lbl_preview_files = QLabel()
+        self.lbl_preview_files.setWordWrap(True)
         self.lbl_preview_files.setStyleSheet(
-            "font-family: 'Consolas', 'Courier New', monospace; font-size: 11.5px; line-height: 1.3;"
+            "font-family: 'Consolas', 'Courier New', monospace; font-size: 11.5px; line-height: 1.4; color: #6B6B6F;"
         )
         preview_layout.addWidget(self.lbl_preview_files)
         layout.addWidget(self.naming_preview_card)
 
-        # Bottom Action Bar
-        bottom_row = QHBoxLayout()
-        bottom_row.addStretch(1)
-
-        self.btn_split = QPushButton(tr("start_splitting"))
-        self.btn_split.setObjectName("primaryButton")
-        self.btn_split.setIcon(get_icon("scissors", color="#FFFFFF", size=15))
-        self.btn_split.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_split.setStyleSheet("padding: 0 22px; min-height: 34px; font-weight: 400; font-size: 12.5px; border-radius: 17px; color: #FFFFFF;")
-        self.btn_split.clicked.connect(self._on_split_clicked)
-        bottom_row.addWidget(self.btn_split)
-
-        layout.addLayout(bottom_row)
+        # Initialize naming preview text
+        self._update_naming_preview()
         return widget
 
     def _create_batch_renamer_container(self) -> QWidget:
@@ -560,20 +589,6 @@ class SplitToolView(QWidget):
         batch_layout.addWidget(self.preview_table)
 
         layout.addWidget(self.batch_folder_card)
-
-        # Bottom Action Bar
-        bottom_row = QHBoxLayout()
-        bottom_row.addStretch(1)
-
-        self.btn_start_batch = QPushButton(tr("start_batch_rename"))
-        self.btn_start_batch.setObjectName("primaryButton")
-        self.btn_start_batch.setIcon(get_icon("rotate-cw", color="#FFFFFF", size=15))
-        self.btn_start_batch.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_start_batch.setStyleSheet("padding: 0 22px; min-height: 34px; font-weight: 400; font-size: 12.5px; border-radius: 17px; color: #FFFFFF;")
-        self.btn_start_batch.clicked.connect(self._on_start_batch_rename_clicked)
-        bottom_row.addWidget(self.btn_start_batch)
-
-        layout.addLayout(bottom_row)
         return widget
 
     def _create_single_localizer_container(self) -> QWidget:
@@ -801,16 +816,26 @@ class SplitToolView(QWidget):
             self.splitter_container.setVisible(True)
             self.batch_container.setVisible(False)
             self.single_container.setVisible(False)
+            if hasattr(self, "bottom_bar"):
+                self.bottom_bar.setVisible(True)
+                self.btn_split.setVisible(True)
+                self.btn_start_batch.setVisible(False)
             self.title_label.setText(tr("split_tool_title"))
         elif mode_id == 1:
             self.splitter_container.setVisible(False)
             self.batch_container.setVisible(True)
             self.single_container.setVisible(False)
+            if hasattr(self, "bottom_bar"):
+                self.bottom_bar.setVisible(True)
+                self.btn_split.setVisible(False)
+                self.btn_start_batch.setVisible(True)
             self.title_label.setText(tr("translator_mode_batch"))
         else:
             self.splitter_container.setVisible(False)
             self.batch_container.setVisible(False)
             self.single_container.setVisible(True)
+            if hasattr(self, "bottom_bar"):
+                self.bottom_bar.setVisible(False)
             self.title_label.setText(tr("translator_mode_text"))
 
     # ── Batch Folder Renamer Handlers ──
@@ -1053,6 +1078,7 @@ class SplitToolView(QWidget):
                 item.widget().deleteLater()
 
         is_dark = get_theme() == "dark"
+        font_family = '"Google Sans", "Kantumruy Pro", "Khmer OS Battambang", "Leelawadee UI", "Segoe UI", sans-serif'
 
         for text in self._candidate_items:
             is_selected = text == self._selected_candidate
@@ -1072,10 +1098,10 @@ class SplitToolView(QWidget):
                     color = "#1259C3"
                 card.setStyleSheet(
                     f"QPushButton {{ text-align: left; background-color: {bg}; "
-                    f"border: {border}; border-radius: 8px; padding: 6px 10px; "
-                    f"min-height: 30px; font-size: 12px; font-weight: 400; color: {color}; }}"
+                    f"border: {border}; border-radius: 8px; padding: 7px 12px; "
+                    f"min-height: 36px; font-family: {font_family}; font-size: 13.5px; font-weight: 400; color: {color}; }}"
                 )
-                card.setIcon(get_icon("check", color=color, size=13))
+                card.setIcon(get_icon("check", color=color, size=14))
             else:
                 if is_dark:
                     bg = "rgba(255, 255, 255, 0.05)"
@@ -1087,8 +1113,8 @@ class SplitToolView(QWidget):
                     color = "#1C1C1E"
                 card.setStyleSheet(
                     f"QPushButton {{ text-align: left; background-color: {bg}; "
-                    f"border: {border}; border-radius: 8px; padding: 6px 10px; "
-                    f"min-height: 30px; font-size: 12px; font-weight: 400; color: {color}; }}"
+                    f"border: {border}; border-radius: 8px; padding: 7px 12px; "
+                    f"min-height: 36px; font-family: {font_family}; font-size: 13.5px; font-weight: 400; color: {color}; }}"
                 )
                 card.setIcon(QIcon())
 

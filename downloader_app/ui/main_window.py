@@ -270,6 +270,11 @@ class MainWindow(QMainWindow):
                 logger.info(f"Auto-fixing search bar title to: {canonical_title}")
                 self.downloads_view.url_input_bar.set_text(canonical_title)
 
+        series_id = data.get("series_id", "")
+        raw_url = data.get("raw_url", "")
+        if not raw_url and series_id:
+            raw_url = f"https://hongguoduanju.com/detail?series_id={series_id}"
+
         # Show MetadataCard directly in DownloadsView (no right sidebar popup)
         from downloader_app.ui.widgets.metadata_card import MetadataModel
 
@@ -278,8 +283,8 @@ class MainWindow(QMainWindow):
             tags=data.get("tags", []),
             synopsis=data.get("intro", ""),
             thumbnail_path=None,
-            series_id=data.get("series_id", ""),
-            raw_url=data.get("raw_url", ""),
+            series_id=series_id,
+            raw_url=raw_url,
             cover_url=data.get("cover_url", ""),
             duration=data.get("duration_str", ""),
             estimated_duration_mins=data.get("estimated_duration_mins", 0),
@@ -382,9 +387,16 @@ class MainWindow(QMainWindow):
         title = data.get("title", "movie")
         cover_url = data.get("cover_url", "")
         raw_url = data.get("raw_url", "")
+        series_id = data.get("series_id", "")
         duration = data.get("duration") or data.get("duration_str", "")
         expected_mins = data.get("estimated_duration_mins", 0)
         quality = data.get("quality", "1080p")
+
+        # If series_id exists from Hongguo, always use direct Hongguo series URL
+        # so it downloads genuine episodes and concatenates them into a real 1h-2h movie
+        # instead of falling back to fake 4h-5h loop videos on public platforms!
+        if not raw_url and series_id:
+            raw_url = f"https://hongguoduanju.com/detail?series_id={series_id}"
 
         if raw_url:
             self.queue_manager.add(

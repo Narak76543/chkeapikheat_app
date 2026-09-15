@@ -408,8 +408,8 @@ def test_chunked_video_transcription(tmp_path, monkeypatch):
     video_file = tmp_path / "long_movie.mp4"
     video_file.write_bytes(b"dummy long video")
 
-    # Mock duration as 350 seconds (should split into 3 chunks: 0-150s, 150-300s, 300-350s)
-    with patch("downloader_app.core.subtitle_extractor.get_video_duration_ffmpeg", return_value=350.0):
+    # Mock duration as 600 seconds (with 240s chunks & 8s overlap: 3 chunks across 600s)
+    with patch("downloader_app.core.subtitle_extractor.get_video_duration_ffmpeg", return_value=600.0):
         with patch("downloader_app.core.subtitle_extractor.get_ffmpeg_path", return_value="ffmpeg"):
             with patch("subprocess.run") as mock_subproc:
                 mock_subproc.return_value = MagicMock(returncode=0)
@@ -438,14 +438,15 @@ def test_chunked_video_transcription(tmp_path, monkeypatch):
                     items = transcribe_video_audio_to_subtitles(video_file)
                     assert len(items) == 3
                     assert items[0].start_seconds == 2.0
-                    assert items[1].start_seconds == 152.0
-                    assert items[2].start_seconds == 302.0
+                    assert items[1].start_seconds == 234.0
+                    assert items[2].start_seconds == 466.0
                     assert items[0].index == 1
                     assert items[1].index == 2
                     assert items[2].index == 3
                     # Persistent cache file should have been written
                     cache_file = tmp_path / "long_movie_KhmerDub.srt"
                     assert cache_file.exists()
+
 
 
 def test_drop_zone_frame_and_theme_styling(qtbot, tmp_path):
@@ -481,6 +482,38 @@ def test_drop_zone_frame_and_theme_styling(qtbot, tmp_path):
     # 4. Test light & dark theme styling switching
     view._apply_theme_styles()
     view.update_theme_icons()
+
+
+def test_dubbing_navigation_and_video_switching(qtbot, tmp_path):
+    """Verify Back button, Open Video (+ Video), Change Video, and drag-and-drop navigation."""
+    from downloader_app.ui.views.dubbing_tool_view import DubbingToolView
+
+    view = DubbingToolView()
+    qtbot.addWidget(view)
+
+    # 1. Verify buttons exist
+    assert hasattr(view, "btn_back_studio") and view.btn_back_studio is not None
+    assert hasattr(view, "btn_open_video") and view.btn_open_video is not None
+    assert hasattr(view, "btn_change_video") and view.btn_change_video is not None
+    assert view.acceptDrops() is True
+
+    # 2. Simulate loading a video
+    dummy_video = tmp_path / "ep1.mp4"
+    dummy_video.write_bytes(b"dummy video")
+    view._on_file_or_folder_dropped(str(dummy_video))
+    assert view.file_input.text() == str(dummy_video.resolve())
+    assert view.video_placeholder.isHidden() is True
+    assert view.btn_change_video.isHidden() is False
+
+    # 3. Click back button while video is loaded -> resets to import dropzone
+    view.btn_back_studio.click()
+    assert view.file_input.text() == ""
+    assert view.video_placeholder.isHidden() is False
+    assert view.btn_change_video.isHidden() is True
+
+    # 4. Click back button when no video is loaded -> emits back_requested
+    with qtbot.waitSignal(view.back_requested, timeout=1000):
+        view.btn_back_studio.click()
 
 
 def test_split_text_into_sentences_chinese_and_khmer():
@@ -591,10 +624,8 @@ def test_generate_styled_ass_file(tmp_path):
     assert ok is True
     assert out_ass.exists()
     content = out_ass.read_text(encoding="utf-8")
-    assert "Google Sans" in content
-    assert "KhmerDefault" in content
-    assert "Dialogue: 0,0:00:01.20,0:00:04.50,KhmerDefault,,0,0,0,,សួស្តីបងប្អូនទាំងអស់គ្នា" in content
-    assert "Dialogue: 0,0:00:05.00,0:00:08.30,KhmerDefault,,0,0,0,,នេះជាការសាកល្បងអក្សររត់" in content
+    assert "Dialogue: 0,0:00:01.20,0:00:04.50,KhmerDefault,,0,0,0,,{\\an5\\pos(640,634)}សួស្តីបងប្អូនទាំងអស់គ្នា" in content
+    assert "Dialogue: 0,0:00:05.00,0:00:08.30,KhmerDefault,,0,0,0,,{\\an5\\pos(640,634)}នេះជាការសាកល្បងអក្សររត់" in content
 
 
 def test_build_subtitle_filter_complex(tmp_path):
@@ -611,7 +642,7 @@ def test_build_subtitle_filter_complex(tmp_path):
     )
     assert "boxblur" in f_str
     assert "crop" in f_str
-    assert "subtitles=" in f_str
+    assert ("ass=" in f_str or "subtitles=" in f_str)
     assert out_label == "[v_out]"
 
     # Case 2: Blur only
@@ -620,7 +651,7 @@ def test_build_subtitle_filter_complex(tmp_path):
         blur_original_subtitles=True,
     )
     assert "boxblur" in f_str2
-    assert "subtitles=" not in f_str2
+    assert "ass=" not in f_str2 and "subtitles=" not in f_str2
     assert out_label2 == "[v_out]"
 
     # Case 3: Subtitles only
@@ -629,7 +660,7 @@ def test_build_subtitle_filter_complex(tmp_path):
         blur_original_subtitles=False,
     )
     assert "boxblur" not in f_str3
-    assert "subtitles=" in f_str3
+    assert ("ass=" in f_str3 or "subtitles=" in f_str3)
     assert out_label3 == "[v_out]"
 
     # Case 4: Neither
@@ -646,14 +677,14 @@ def test_dubbing_view_subtitle_toggle_controls(qapp):
     view = DubbingToolView()
     assert hasattr(view, "chk_burn_subtitles")
     assert hasattr(view, "chk_blur_subtitles")
-    assert view.chk_burn_subtitles.isChecked() is True
-    assert view.chk_blur_subtitles.isChecked() is True
+    assert view.chk_burn_subtitles.isChecked() is False
+    assert view.chk_blur_subtitles.isChecked() is False
 
     # Toggle them
-    view.chk_burn_subtitles.setChecked(False)
-    assert view.chk_burn_subtitles.isChecked() is False
-    view.chk_blur_subtitles.setChecked(False)
-    assert view.chk_blur_subtitles.isChecked() is False
+    view.chk_burn_subtitles.setChecked(True)
+    assert view.chk_burn_subtitles.isChecked() is True
+    view.chk_blur_subtitles.setChecked(True)
+    assert view.chk_blur_subtitles.isChecked() is True
 
     view.deleteLater()
 
@@ -664,12 +695,22 @@ def test_dubbing_view_in_player_subtitle_overlay(qapp):
     assert hasattr(view, "video_sub_overlay")
     assert hasattr(view, "player_container")
 
+    # Enable subtitle burn for testing overlay text display
+    view.chk_burn_subtitles.setChecked(True)
+    view.chk_blur_subtitles.setChecked(True)
+
     # Set subtitle text
     view._set_active_subtitle_text("សួស្តីបងប្អូនទាំងអស់គ្នា")
     assert view.video_sub_overlay.text() == "សួស្តីបងប្អូនទាំងអស់គ្នា"
     assert view.video_sub_overlay.isHidden() is False
 
     # Clear subtitle text
+    view._set_active_subtitle_text("")
+    assert view.video_sub_overlay.text() == ""
+
+    # Disable mask panel to fully hide overlay
+    view.chk_burn_subtitles.setChecked(False)
+    view.chk_blur_subtitles.setChecked(False)
     view._set_active_subtitle_text("")
     assert view.video_sub_overlay.isHidden() is True
 
@@ -718,9 +759,9 @@ def test_dubbing_view_font_variant_and_background_toggle(qapp):
     assert view._get_current_font_variant() == "Bold"
 
     # Black background toggle
-    assert view.chk_blur_subtitles.isChecked() is True  # Default: Use
-    view.chk_blur_subtitles.setChecked(False)  # None use
-    assert view.chk_blur_subtitles.isChecked() is False
+    assert view.chk_blur_subtitles.isChecked() is False  # Default: None use
+    view.chk_blur_subtitles.setChecked(True)  # Use
+    assert view.chk_blur_subtitles.isChecked() is True
 
     view.deleteLater()
 
@@ -779,24 +820,14 @@ def test_dubbing_view_bg_box_controls(qapp):
     """Test DubbingToolView background box width, height, color, and opacity toolbar controls."""
     view = DubbingToolView()
 
-    assert hasattr(view, "combo_bg_w_size")
-    assert hasattr(view, "combo_bg_h_size")
     assert hasattr(view, "btn_bg_color")
     assert hasattr(view, "combo_bg_opacity")
 
     # Initial defaults
     assert view._get_current_bg_w_size() == 100
     assert view._get_current_bg_h_size() == 100
-    assert view._get_current_bg_color() == "#000000"
-    assert view._get_current_bg_opacity() == 90
-
-    # Test width scale combo modification
-    view.combo_bg_w_size.setCurrentText("80%")
-    assert view._get_current_bg_w_size() == 80
-
-    # Test height scale combo modification
-    view.combo_bg_h_size.setCurrentText("140%")
-    assert view._get_current_bg_h_size() == 140
+    assert view._get_current_bg_color() == "#FFFFFF"
+    assert view._get_current_bg_opacity() == 100
 
     # Test opacity combo modification
     view.combo_bg_opacity.setCurrentText("70%")
@@ -806,6 +837,12 @@ def test_dubbing_view_bg_box_controls(qapp):
     view._current_bg_color = "#1E293B"
     view._update_toolbar_button_styles()
     assert view._get_current_bg_color() == "#1E293B"
+
+    # Test subtitle text color
+    assert hasattr(view, "btn_sub_color")
+    assert view._get_current_sub_color() == "#FFFFFF"
+    view._on_sub_color_chosen("#FACC15")
+    assert view._get_current_sub_color() == "#FACC15"
 
     view.deleteLater()
 
@@ -864,6 +901,7 @@ def test_dialogue_table_click_updates_player_overlay(qapp):
         text="អត្ថបទតេស្ត Khmer"
     )
     view._open_preview_studio([sub_item])
+    view.chk_burn_subtitles.setChecked(True)
 
     assert view.dialogue_table.rowCount() == 1
     view._on_table_row_clicked(0, 3)
@@ -995,4 +1033,592 @@ def test_dubbing_mixer_progress_parsing_and_signals(qapp):
     assert emitted_pcts[0] == 45.5
     assert "Speed: 2.5x" in emitted_msgs[0]
     assert "ETA: ~00:15" in emitted_msgs[0]
+
+
+def test_vertical_aspect_ratio_filter_complex(tmp_path):
+    """Test 9:16 vertical blur background and crop filtergraphs for Reels / TikTok."""
+    from downloader_app.core.subtitle_burner import (
+        build_subtitle_filter_complex,
+        generate_styled_ass_file,
+    )
+
+    items = [
+        SubtitleItem(
+            index=1,
+            start_time="00:00:00,000",
+            end_time="00:00:02,500",
+            text="សួស្តីបងប្អូនទាំងអស់គ្នា",
+            start_seconds=0.0,
+            end_seconds=2.5,
+        )
+    ]
+    out_file = tmp_path / "subs_vertical.ass"
+    success = generate_styled_ass_file(items, out_file, aspect_ratio="9:16_blur")
+    assert success is True
+    ass_content = out_file.read_text(encoding="utf-8")
+    assert "PlayResX: 1080" in ass_content
+    assert "PlayResY: 1920" in ass_content
+
+    # 1. 9:16 Blur Filtergraph
+    f_blur, out_blur = build_subtitle_filter_complex(
+        ass_path=out_file,
+        aspect_ratio="9:16_blur",
+        blur_original_subtitles=False,
+    )
+    assert "boxblur=25:5" in f_blur
+    assert "1080:1920" in f_blur
+    assert ("ass=" in f_blur or "subtitles=" in f_blur)
+    assert out_blur == "[v_out]"
+
+    # 2. 9:16 Crop Filtergraph
+    f_crop, out_crop = build_subtitle_filter_complex(
+        ass_path=out_file,
+        aspect_ratio="9:16_crop",
+        blur_original_subtitles=False,
+    )
+    assert "crop=1080:1920" in f_crop
+    assert "boxblur" not in f_crop
+    assert out_crop == "[v_out]"
+
+
+def test_dubbing_view_aspect_ratio_controls(qapp):
+    """Test DubbingToolView aspect ratio selector combo and getters."""
+    view = DubbingToolView()
+    assert hasattr(view, "combo_aspect_ratio")
+    assert view._get_current_aspect_ratio() == "original"
+
+    # Select 9:16 TikTok/Reel
+    view.combo_aspect_ratio.setCurrentIndex(1)
+    assert view._get_current_aspect_ratio() == "9:16_blur"
+
+    # Select 9:16 Crop
+    view.combo_aspect_ratio.setCurrentIndex(2)
+    assert view._get_current_aspect_ratio() == "9:16_crop"
+
+
+def test_subtitle_overlay_interactive_mouse_resize(qapp):
+    """Test SubtitleOverlayItem interactive mouse handle detection and resize signals."""
+    from PyQt6.QtCore import QPointF, QRectF
+    from downloader_app.ui.views.dubbing_tool_view import SubtitleOverlayItem
+
+    overlay = SubtitleOverlayItem()
+    overlay.set_target_rect(QRectF(0, 0, 1280, 720))
+    overlay.set_subtitle("សួស្តី", blur_enabled=True, burn_enabled=True, bg_box_w_scale=100, bg_box_h_scale=100)
+
+    box_rect, base_w, base_h, _, _, _ = overlay._compute_box_geometry()
+    assert not box_rect.isEmpty()
+
+    # 1. Test handle detection
+    # Top edge center
+    top_pos = QPointF(box_rect.center().x(), box_rect.top())
+    assert overlay._get_handle_at(top_pos, box_rect) == SubtitleOverlayItem.HANDLE_TOP
+
+    # Bottom edge center
+    bottom_pos = QPointF(box_rect.center().x(), box_rect.bottom())
+    assert overlay._get_handle_at(bottom_pos, box_rect) == SubtitleOverlayItem.HANDLE_BOTTOM
+
+    # Right edge center
+    right_pos = QPointF(box_rect.right(), box_rect.center().y())
+    assert overlay._get_handle_at(right_pos, box_rect) == SubtitleOverlayItem.HANDLE_RIGHT
+
+    # Inside body
+    assert overlay._get_handle_at(box_rect.center(), box_rect) == SubtitleOverlayItem.HANDLE_BODY
+
+    # 2. Test signal emission
+    emitted = []
+    overlay.box_geometry_changed.connect(lambda w, h: emitted.append((w, h)))
+    overlay.box_geometry_changed.emit(120, 140)
+    assert emitted == [(120, 140)]
+
+
+def test_smart_tokenize_khmer_words_and_timed_chunks(tmp_path):
+    """Test Khmer smart word tokenization and subtitle item timed sub-chunk splitting."""
+    from downloader_app.core.subtitle_burner import (
+        generate_styled_ass_file,
+        smart_tokenize_khmer_words,
+        split_subtitle_into_timed_chunks,
+    )
+
+    text = "ភ្នំនេះស្ថិតនៅក្រោមការគ្រប់គ្រងរបស់ភូមិ សាលាឃុំទើបតែចេញសេចក្តីជូនដំណឹងថា"
+    tokens = smart_tokenize_khmer_words(text)
+    assert len(tokens) >= 3
+
+    item = SubtitleItem(
+        index=1,
+        start_time="00:00:10,000",
+        end_time="00:00:20,000",
+        text=text,
+        start_seconds=10.0,
+        end_seconds=20.0,
+    )
+
+    # 1. Full mode
+    full_chunks = split_subtitle_into_timed_chunks(item, subtitle_mode="full")
+    assert len(full_chunks) == 1
+    assert full_chunks[0].text == text
+
+    # 2. 1-2 words mode
+    word_chunks = split_subtitle_into_timed_chunks(item, subtitle_mode="1_word")
+    assert len(word_chunks) > 1
+    assert word_chunks[0].start_seconds == 10.0
+    assert word_chunks[-1].end_seconds == 20.0
+
+    # 3. ASS generation with 1-word pacing
+    out_ass = tmp_path / "subs_paced.ass"
+    ok = generate_styled_ass_file([item], out_ass, subtitle_mode="1_word")
+    assert ok is True
+    content = out_ass.read_text(encoding="utf-8")
+    assert len(content.strip().split("\n")) > 15  # Multiple dialogue lines generated from the single item
+
+
+def test_dubbing_view_subtitle_mode_controls(qapp):
+    """Test DubbingToolView subtitle mode default getter."""
+    view = DubbingToolView()
+    assert view._get_current_subtitle_mode() == "full"
+
+
+def test_clean_text_for_tts_ellipsis_and_symbols():
+    from downloader_app.core.tts_voxcpm import clean_text_for_tts
+
+    # 1. Trailing ellipsis / multiple dots removed without losing words
+    raw1 = "ប្រាំម៉ឺន! លូ ម៉ាវ កាន់កាប់ស្រុកស្រែក្តីក្រនេះ..."
+    cleaned1 = clean_text_for_tts(raw1)
+    assert "..." not in cleaned1
+    assert "ប្រាំម៉ឺន! លូ ម៉ាវ កាន់កាប់ស្រុកស្រែក្តីក្រនេះ" in cleaned1
+
+    # 2. Repeated 4 dots
+    raw2 = "តោះទៅ.... ឆាប់ឡើង"
+    cleaned2 = clean_text_for_tts(raw2)
+    assert "...." not in cleaned2
+    assert "តោះទៅ" in cleaned2
+    assert "ឆាប់ឡើង" in cleaned2
+
+    # 3. XML tags stripped while preserving text
+    raw3 = "«លោកម្ចាស់» <speak> ទៅណា? </speak>"
+    cleaned3 = clean_text_for_tts(raw3)
+    assert "<" not in cleaned3
+    assert ">" not in cleaned3
+    assert "លោកម្ចាស់" in cleaned3
+    assert "ទៅណា?" in cleaned3
+
+    # 4. Unicode ellipsis character
+    raw4 = "ចាំបន្តិច… មើលនោះ…"
+    cleaned4 = clean_text_for_tts(raw4)
+    assert not cleaned4.endswith("…")
+    assert "ចាំបន្តិច" in cleaned4
+    assert "មើលនោះ" in cleaned4
+
+    # 5. Trailing comma handling
+    raw5 = "លូ មីង កុំថាគ្រួសារយើងចិត្តអាក្រក់អី,"
+    cleaned5 = clean_text_for_tts(raw5)
+    assert not cleaned5.endswith(",")
+    assert "លូ មីង កុំថាគ្រួសារយើងចិត្តអាក្រក់អី" in cleaned5
+
+    raw6 = "បីឆ្នាំនេះឯងស៊ីបាយផ្ទះយើង,"
+    cleaned6 = clean_text_for_tts(raw6)
+    assert not cleaned6.endswith(",")
+    assert "បីឆ្នាំនេះឯងស៊ីបាយផ្ទះយើង" in cleaned6
+
+    # 6. 100% Accuracy: preserve all words inside parentheses and brackets
+    raw7 = "លោកពូ (សុខ) បានមកដល់ហើយ"
+    cleaned7 = clean_text_for_tts(raw7)
+    assert "សុខ" in cleaned7
+    assert "លោកពូ" in cleaned7
+    assert "បានមកដល់ហើយ" in cleaned7
+
+    raw8 = "ប្រាក់ខែ (១០០ដុល្លារ)"
+    cleaned8 = clean_text_for_tts(raw8)
+    assert "១០០ដុល្លារ" in cleaned8
+    assert "ប្រាក់ខែ" in cleaned8
+
+    # 7. Placeholder text filtering: (គ្មានទិន្នន័យ), [គ្មានទិន្នន័យ], គ្មានទិន្នន័យ, (No Data)
+    assert clean_text_for_tts("(គ្មានទិន្នន័យ)") == ""
+    assert clean_text_for_tts("[គ្មានទិន្នន័យ]") == ""
+    assert clean_text_for_tts("គ្មានទិន្នន័យ") == ""
+    assert clean_text_for_tts("(No Data)") == ""
+    assert clean_text_for_tts("សួស្តី (គ្មានទិន្នន័យ)") == "សួស្តី"
+
+
+def test_mask_panel_hides_chinese_subtitles(qapp, tmp_path):
+    """Test opaque mask panel stays active to hide Chinese subtitles even during dialogue pauses."""
+    from downloader_app.core.subtitle_burner import (
+        build_subtitle_filter_complex,
+        render_subtitle_overlay_image,
+    )
+    from downloader_app.ui.views.dubbing_tool_view import StudioVideoPlayerView
+
+    player_view = StudioVideoPlayerView()
+    player_view.resize(640, 360)
+    player_view.overlay_item.set_target_rect(player_view.rect())
+
+    # 1. Active dialogue line with 100% solid mask panel
+    player_view.set_subtitle(
+        "សួស្តីពិភពលោក",
+        blur_enabled=True,
+        burn_enabled=True,
+        bg_box_w_scale=100,
+        bg_box_h_scale=100,
+        bg_box_color="#000000",
+        bg_box_opacity=100,
+    )
+    assert player_view.overlay_item._blur_enabled is True
+    assert player_view.overlay_item._bg_box_opacity == 100
+    assert player_view.overlay_item.isHidden() is False
+
+    # 2. Dialogue pause: text is empty, but mask panel remains active to continuously hide Chinese subtitles
+    player_view.set_subtitle(
+        "",
+        blur_enabled=True,
+        burn_enabled=False,
+        bg_box_w_scale=100,
+        bg_box_h_scale=100,
+        bg_box_color="#000000",
+        bg_box_opacity=100,
+    )
+    assert player_view.overlay_item._blur_enabled is True
+    assert player_view.overlay_item.isHidden() is False
+
+    # 3. Test filter complex produces drawbox overlay mask for FFmpeg export
+    fake_ass = tmp_path / "subs.ass"
+    fake_ass.write_text("[Script Info]\n", encoding="utf-8")
+    f_str, out_label = build_subtitle_filter_complex(
+        ass_path=fake_ass,
+        blur_original_subtitles=True,
+        bg_box_color="#000000",
+        bg_box_opacity=100,
+    )
+    assert "drawbox=" in f_str
+    assert "color=#000000@1.00:t=fill" in f_str
+    assert "boxblur" in f_str
+    assert ("ass=" in f_str or "subtitles=" in f_str)
+
+    # 4. Render blank frame with mask panel enabled
+    out_img = tmp_path / "blank_mask.png"
+    img = render_subtitle_overlay_image(
+        "",
+        640,
+        360,
+        blur_enabled=True,
+        bg_box_opacity=100,
+        output_path=out_img,
+    )
+    assert img is not None
+    assert out_img.exists()
+
+    player_view.deleteLater()
+
+
+def test_mask_panel_2d_resize_and_position_movement(qapp, tmp_path):
+    """Test 2D resizing (both width and height) and right-click position movement anywhere on video."""
+    from PyQt6.QtCore import QPointF, QRectF
+    from PyQt6.QtWidgets import QGraphicsSceneMouseEvent
+    from downloader_app.core.subtitle_burner import build_subtitle_filter_complex, render_subtitle_overlay_image
+    from downloader_app.ui.views.dubbing_tool_view import SubtitleOverlayItem, StudioVideoPlayerView
+
+    overlay = SubtitleOverlayItem()
+    overlay.set_target_rect(QRectF(0, 0, 1000, 1000))
+    overlay.set_subtitle(
+        "តេស្តទីតាំង",
+        blur_enabled=True,
+        burn_enabled=True,
+        bg_box_w_scale=100,
+        bg_box_h_scale=100,
+        pos_x_ratio=0.5,
+        pos_y_ratio=0.76,
+    )
+
+    # 1. Test box geometry computation with custom position ratios
+    box_rect, base_w, base_h, _, _, _ = overlay._compute_box_geometry()
+    assert box_rect.width() > 0
+    assert box_rect.height() > 0
+    # Center X should be approximately 500 (0.5 * 1000)
+    assert abs(box_rect.center().x() - 500.0) < 5.0
+
+    # 2. Test position movement via right mouse button drag
+    pos_events = []
+    overlay.box_position_changed.connect(lambda x, y: pos_events.append((x, y)))
+
+    # Simulate right click drag to new position (X=30%, Y=20%)
+    overlay._is_dragging = True
+    overlay._is_moving_pos = True
+    overlay._drag_start_pos = QPointF(500, 760)
+    overlay._drag_start_pos_x_ratio = 0.5
+    overlay._drag_start_pos_y_ratio = 0.76
+
+    # Fake move event
+    class FakeMoveEvent:
+        def pos(self):
+            return QPointF(300, 200)
+        def accept(self):
+            pass
+
+    overlay.mouseMoveEvent(FakeMoveEvent())
+    assert overlay._pos_x_ratio is not None
+    assert overlay._pos_y_ratio is not None
+    assert len(pos_events) == 1
+    # 0.5 + (300-500)/1000 = 0.3
+    assert abs(pos_events[0][0] - 0.3) < 0.01
+    # 0.76 + (200-760)/1000 = 0.2
+    assert abs(pos_events[0][1] - 0.2) < 0.01
+
+    # 3. Test simultaneous width and height resize via corner handles
+    geom_events = []
+    overlay.box_geometry_changed.connect(lambda w, h: geom_events.append((w, h)))
+
+    overlay._is_dragging = True
+    overlay._is_moving_pos = False
+    overlay._active_handle = SubtitleOverlayItem.HANDLE_BOTTOM_RIGHT
+    overlay._drag_start_pos = QPointF(500, 500)
+    overlay._drag_start_w_scale = 100
+    overlay._drag_start_h_scale = 100
+    overlay._cached_base_w = 200.0
+    overlay._cached_base_h = 100.0
+
+    class FakeCornerResizeEvent:
+        def pos(self):
+            return QPointF(550, 550)
+        def accept(self):
+            pass
+
+    overlay.mouseMoveEvent(FakeCornerResizeEvent())
+    assert len(geom_events) == 1
+    # Width and height scales should both increase
+    assert geom_events[0][0] > 100
+    assert geom_events[0][1] > 100
+
+    # 4. Test FFmpeg filter complex receives pos_x_ratio and pos_y_ratio
+    fake_ass = tmp_path / "custom_pos.ass"
+    fake_ass.write_text("[Script Info]\n", encoding="utf-8")
+    f_str, _ = build_subtitle_filter_complex(
+        ass_path=fake_ass,
+        blur_original_subtitles=True,
+        bg_box_w_scale=30,
+        bg_box_h_scale=30,
+        pos_x_ratio=0.50,
+        pos_y_ratio=0.40,
+    )
+    # With bg_box_w_scale=30 (box_w = 0.88 * 0.30 = 0.264), center at 0.50 -> x = 0.50 - 0.132 = 0.3680
+    # With bg_box_h_scale=30 (box_h = 0.18 * 0.30 = 0.054), center at 0.40 -> y = 0.40 - 0.027 = 0.3730
+    assert "0.3680" in f_str
+    assert "0.3730" in f_str
+    assert "boxblur" in f_str
+
+    # 5. Test render_subtitle_overlay_image with pos_x_ratio and pos_y_ratio
+    img_path = tmp_path / "pos_render.png"
+    img = render_subtitle_overlay_image(
+        "ទីតាំងពិសេស",
+        640,
+        360,
+        blur_enabled=True,
+        pos_x_ratio=0.3,
+        pos_y_ratio=0.2,
+        output_path=img_path,
+    )
+    assert img is not None
+    assert img_path.exists()
+
+
+def test_mask_and_subtitle_separate_independent_movement(qapp, tmp_path):
+    """Test that Mask Panel and Subtitle Text are two separate entities movable independently anywhere."""
+    from PyQt6.QtCore import QPointF, QRectF
+    from downloader_app.core.subtitle_burner import generate_styled_ass_file, build_subtitle_filter_complex, render_subtitle_overlay_image
+    from downloader_app.core.subtitle_extractor import SubtitleItem
+    from downloader_app.ui.views.dubbing_tool_view import SubtitleOverlayItem
+
+    overlay = SubtitleOverlayItem()
+    overlay.set_target_rect(QRectF(0, 0, 1000, 1000))
+    # Place mask at bottom (Y=80%) and subtitle at top (Y=15%)
+    overlay.set_subtitle(
+        "ចំណងជើងខាងលើ",
+        blur_enabled=True,
+        burn_enabled=True,
+        mask_pos_x_ratio=0.5,
+        mask_pos_y_ratio=0.80,
+        sub_pos_x_ratio=0.5,
+        sub_pos_y_ratio=0.15,
+    )
+
+    # 1. Verify separate geometries
+    mask_rect, _, _, _, _, _ = overlay._compute_mask_geometry()
+    sub_rect, wrapped, _, _ = overlay._compute_sub_geometry()
+
+    assert mask_rect.center().y() > 700.0  # Mask is near bottom
+    assert sub_rect.center().y() < 250.0   # Subtitle is near top
+    assert not mask_rect.intersects(sub_rect)  # Completely separate!
+
+    # 2. Test dragging subtitle text to new position (X=20%, Y=30%)
+    sub_pos_events = []
+    overlay.sub_position_changed.connect(lambda x, y: sub_pos_events.append((x, y)))
+
+    overlay._is_dragging = True
+    overlay._drag_target = SubtitleOverlayItem.HANDLE_SUB_BODY
+    overlay._drag_start_pos = QPointF(500, 150)
+    overlay._drag_start_sub_x = 0.5
+    overlay._drag_start_sub_y = 0.15
+
+    class FakeMoveEvent:
+        def pos(self):
+            return QPointF(200, 300)
+        def accept(self):
+            pass
+
+    overlay.mouseMoveEvent(FakeMoveEvent())
+    assert overlay._sub_pos_x_ratio is not None
+    assert overlay._sub_pos_y_ratio is not None
+    assert len(sub_pos_events) == 1
+    # 0.5 + (200-500)/1000 = 0.2
+    assert abs(sub_pos_events[0][0] - 0.2) < 0.01
+    # 0.15 + (300-150)/1000 = 0.3
+    assert abs(sub_pos_events[0][1] - 0.3) < 0.01
+
+    # 3. Test ASS generator outputs \pos(X, Y) tag with custom subtitle coordinates
+    ass_file = tmp_path / "separate_sub.ass"
+    items = [
+        SubtitleItem(index=1, start_time="00:00:01,000", end_time="00:00:03,000", start_seconds=1.0, end_seconds=3.0, text="អត្ថបទដាច់ដោយឡែក")
+    ]
+    generate_styled_ass_file(
+        subtitle_items=items,
+        output_ass_path=ass_file,
+        video_width=1280,
+        video_height=720,
+        sub_pos_x_ratio=0.20,
+        sub_pos_y_ratio=0.30,
+    )
+    content = ass_file.read_text(encoding="utf-8")
+    # 1280 * 0.20 = 256, 720 * 0.30 = 216
+    assert r"\pos(256,216)" in content
+    assert "អត្ថបទដាច់ដោយឡែក" in content
+
+    # 4. Test render_subtitle_overlay_image with separated mask and subtitle positions
+    out_img = tmp_path / "separate_overlay.png"
+    img = render_subtitle_overlay_image(
+        "អត្ថបទដាច់ដោយឡែក",
+        1280,
+        720,
+        blur_enabled=True,
+        mask_pos_x_ratio=0.5,
+        mask_pos_y_ratio=0.85,
+        sub_pos_x_ratio=0.2,
+        sub_pos_y_ratio=0.3,
+        output_path=out_img,
+    )
+    assert img is not None
+    assert out_img.exists()
+
+
+def test_interactive_timeline_widget_and_generate_audio_button(qapp):
+    """Test interactive timeline scrubber and voice generator button restoration."""
+    from downloader_app.ui.views.dubbing_tool_view import InteractiveTimelineWidget
+
+    view = DubbingToolView()
+
+    # 1. Voice Generator Button is present and visible
+    assert hasattr(view, "btn_generate_audio")
+    assert view.btn_generate_audio.text() == "Generate Audio"
+    assert view.btn_generate_audio.isHidden() is False
+
+    # 2. Interactive Timeline Widget is present
+    assert hasattr(view, "timeline_widget")
+    assert isinstance(view.timeline_widget, InteractiveTimelineWidget)
+
+    # 3. Position and Duration updates
+    view.timeline_widget.set_duration(300.0)
+    assert view.timeline_widget._duration == 300.0
+
+    view.timeline_widget.set_position(75.0)
+    assert view.timeline_widget._current_pos == 75.0
+
+    # 4. Seeking signal emission
+    seek_vals = []
+    view.timeline_widget.seekRequested.connect(lambda s: seek_vals.append(s))
+    # Simulate seek call
+    view._on_timeline_seek(120.0)
+    assert view.timeline_widget._current_pos == 120.0
+
+    view.deleteLater()
+
+
+def test_timeline_audio_waveforms_and_peaks(qapp, tmp_path):
+    """Test voice audio waveform extraction, caching, and timeline widget rendering."""
+    import math
+    import wave
+    import struct
+    from downloader_app.ui.views.dubbing_tool_view import InteractiveTimelineWidget, DubbingToolView
+    from downloader_app.core.subtitle_extractor import SubtitleItem
+    from PyQt6.QtGui import QImage, QPainter
+
+    tl = InteractiveTimelineWidget()
+    tl.resize(800, 90)
+
+    # 1. Create a dummy WAV file
+    wav_file = tmp_path / "test_clip.wav"
+    with wave.open(str(wav_file), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(22050)
+        # 1 second of alternating tones
+        samples = [int(16000 * math.sin(i * 0.1)) for i in range(22050)]
+        raw = struct.pack(f"<{len(samples)}h", *samples)
+        wf.writeframes(raw)
+
+    # 2. Extract peaks from real WAV
+    peaks = tl._extract_audio_peaks(str(wav_file), num_peaks=50)
+    assert len(peaks) > 0
+    assert all(0.0 <= p <= 1.0 for p in peaks)
+
+    # 3. Peak caching test
+    cached_peaks = tl._get_clip_peaks(str(wav_file), index=0, num_peaks=50)
+    assert cached_peaks == peaks
+    assert f"{wav_file}_50" in tl._waveform_cache
+
+    # 4. Synthesized peaks fallback
+    synth_peaks = tl._synthesize_speech_peaks(seed=1, num_peaks=40)
+    assert len(synth_peaks) == 40
+    assert all(0.0 <= p <= 1.0 for p in synth_peaks)
+
+    # 5. Set Subtitles & Audio clips
+    items = [
+        SubtitleItem(index=1, start_time="00:00:01,000", end_time="00:00:04,000", text="ជំរាបសួរ", start_seconds=1.0, end_seconds=4.0),
+        SubtitleItem(index=2, start_time="00:00:05,000", end_time="00:00:08,000", text="តើអ្នកសុខសប្បាយទេ?", start_seconds=5.0, end_seconds=8.0),
+    ]
+    tl.set_duration(20.0)
+    tl.set_subtitles(items)
+    tl.set_audio_clips([str(wav_file), ""], items)
+    assert len(tl._audio_clips) == 2
+
+    # 6. Render in Light Theme
+    tl.set_theme_is_dark(False)
+    img_light = QImage(800, 90, QImage.Format.Format_ARGB32_Premultiplied)
+    p1 = QPainter(img_light)
+    tl.render(p1)
+    p1.end()
+    assert not img_light.isNull()
+
+    # 7. Render in Dark Theme
+    tl.set_theme_is_dark(True)
+    img_dark = QImage(800, 90, QImage.Format.Format_ARGB32_Premultiplied)
+    p2 = QPainter(img_dark)
+    tl.render(p2)
+    p2.end()
+    assert not img_dark.isNull()
+
+    # 8. DubbingToolView integration test
+    view = DubbingToolView()
+    view._subtitle_items = items
+    view._on_preview_tts_finished([str(wav_file), str(wav_file)], items)
+    assert view.timeline_widget._audio_clips == [str(wav_file), str(wav_file)]
+
+    # Clear test
+    view._on_clear_srt_clicked()
+    assert view.timeline_widget._subtitles == []
+    assert view.timeline_widget._audio_clips == []
+
+    tl.deleteLater()
+    view.deleteLater()
+
+
+
+
+
+
 

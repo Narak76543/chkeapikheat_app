@@ -138,6 +138,36 @@ def _read_clip_pcm_fast(clip_path: Path, sample_rate: int = 48000, ffmpeg_bin: s
     return res_pcm.stdout or b""
 
 
+def _apply_pcm_boundary_fades(pcm_bytes: bytes, fade_frames: int = 576) -> bytes:
+    """
+    Applies smooth micro fade-in and fade-out to 16-bit stereo PCM bytes (576 frames = 12ms at 48kHz).
+    Prevents digital boundary clicks, DC offset pops, and ensures seamless acoustic transitions
+    when switching between voice turns or characters.
+    """
+    if not pcm_bytes or len(pcm_bytes) < (fade_frames * 4 * 2):
+        return pcm_bytes
+
+    import array
+    arr = array.array("h", pcm_bytes)
+    total_samples = len(arr)
+    fade_samples = fade_frames * 2
+
+    # Smooth linear fade-in
+    for i in range(0, min(fade_samples, total_samples // 2), 2):
+        factor = (i // 2) / float(fade_frames)
+        arr[i] = int(arr[i] * factor)
+        arr[i + 1] = int(arr[i + 1] * factor)
+
+    # Smooth linear fade-out
+    for i in range(0, min(fade_samples, total_samples // 2), 2):
+        factor = (i // 2) / float(fade_frames)
+        idx = total_samples - 2 - i
+        arr[idx] = int(arr[idx] * factor)
+        arr[idx + 1] = int(arr[idx + 1] * factor)
+
+    return arr.tobytes()
+
+
 class DubbingMixerWorker(QThread):
     """Worker thread that stitches audio clips into a master track and muxes them into target video via FFmpeg."""
 
@@ -159,12 +189,21 @@ class DubbingMixerWorker(QThread):
         blur_subtitles: bool = True,
         font_name: str = "Google Sans",
         font_variant: str = "Bold",
-        font_size: int = 28,
+        font_size: int = 30,
+        sub_color: str = "#FFFFFF",
         bg_box_scale: int | None = None,
         bg_box_w_scale: int = 100,
         bg_box_h_scale: int = 100,
-        bg_box_color: str = "#000000",
-        bg_box_opacity: int = 90,
+        bg_box_color: str = "#FFFFFF",
+        bg_box_opacity: int = 100,
+        pos_x_ratio: float | None = None,
+        pos_y_ratio: float | None = None,
+        mask_pos_x_ratio: float | None = None,
+        mask_pos_y_ratio: float | None = None,
+        sub_pos_x_ratio: float | None = None,
+        sub_pos_y_ratio: float | None = None,
+        aspect_ratio: str = "original",
+        subtitle_mode: str = "full",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -180,10 +219,19 @@ class DubbingMixerWorker(QThread):
         self.font_name = font_name
         self.font_variant = font_variant
         self.font_size = font_size
+        self.sub_color = sub_color
         self.bg_box_w_scale = bg_box_w_scale
         self.bg_box_h_scale = bg_box_scale if bg_box_scale is not None else bg_box_h_scale
         self.bg_box_color = bg_box_color
         self.bg_box_opacity = bg_box_opacity
+        self.pos_x_ratio = pos_x_ratio
+        self.pos_y_ratio = pos_y_ratio
+        self.mask_pos_x_ratio = mask_pos_x_ratio if mask_pos_x_ratio is not None else pos_x_ratio
+        self.mask_pos_y_ratio = mask_pos_y_ratio if mask_pos_y_ratio is not None else pos_y_ratio
+        self.sub_pos_x_ratio = sub_pos_x_ratio
+        self.sub_pos_y_ratio = sub_pos_y_ratio
+        self.aspect_ratio = aspect_ratio
+        self.subtitle_mode = subtitle_mode
         self._process: subprocess.Popen | None = None
 
     def stop(self) -> None:
@@ -291,11 +339,11 @@ class DubbingMixerWorker(QThread):
 
                 effective_start = max(0.0, item.start_seconds - shift_offset)
 
-                # ── Guaranteed Non-Overlap Pacing ──────────────────────────────────
+                # ── Guaranteed Non-Overlap & Smooth Turn-Taking Pacing ─────────────
                 # If the previous speech clip has not finished yet, shift this clip to start
-                # naturally right after the previous clip finishes (+60ms natural breath pause).
-                if effective_start < last_clip_end_time + 0.06:
-                    effective_start = last_clip_end_time + 0.06
+                # naturally right after the previous clip finishes (+100ms natural conversational breath pause).
+                if effective_start < last_clip_end_time + 0.10:
+                    effective_start = last_clip_end_time + 0.10
 
                 target_start_frame = int(effective_start * sample_rate)
                 start_byte = target_start_frame * bytes_per_frame
@@ -319,6 +367,9 @@ class DubbingMixerWorker(QThread):
 
                     if not clip_bytes or len(clip_bytes) < bytes_per_frame:
                         continue
+
+                    # Apply studio acoustic micro-fades (12ms) to eliminate clicks and pops between speaker turns
+                    clip_bytes = _apply_pcm_boundary_fades(clip_bytes, fade_frames=576)
 
                     clip_dur_sec = len(clip_bytes) / (sample_rate * bytes_per_frame)
                     last_clip_end_time = effective_start + clip_dur_sec
@@ -422,6 +473,11 @@ class DubbingMixerWorker(QThread):
                 base_font_size=self.font_size,
                 video_width=w,
                 video_height=h,
+                aspect_ratio=self.aspect_ratio,
+                subtitle_mode=self.subtitle_mode,
+                sub_pos_x_ratio=self.sub_pos_x_ratio,
+                sub_pos_y_ratio=self.sub_pos_y_ratio,
+                sub_color=self.sub_color,
             )
 
             self.progress_changed.emit(25.0, "Subtitle file ready. Starting video encoding...")
@@ -431,7 +487,7 @@ class DubbingMixerWorker(QThread):
             # The ASS subtitle file is used directly via the fast FFmpeg subtitles= filter instead.
             overlay_concat_file = None
 
-        if self.blur_subtitles or (self.burn_subtitles and (overlay_concat_file or (ass_path and ass_path.exists()))):
+        if self.blur_subtitles or self.aspect_ratio != "original" or (self.burn_subtitles and (overlay_concat_file or (ass_path and ass_path.exists()))):
             overlay_idx = 2 if overlay_concat_file else 1
             v_filter_str, v_out_label = build_subtitle_filter_complex(
                 ass_path=ass_path if (not overlay_concat_file and self.burn_subtitles and ass_path and ass_path.exists()) else None,
@@ -440,6 +496,15 @@ class DubbingMixerWorker(QThread):
                 video_width=w,
                 video_height=h,
                 overlay_input_index=overlay_idx,
+                aspect_ratio=self.aspect_ratio,
+                bg_box_w_scale=self.bg_box_w_scale,
+                bg_box_h_scale=self.bg_box_h_scale,
+                bg_box_color=self.bg_box_color,
+                bg_box_opacity=self.bg_box_opacity,
+                mask_pos_x_ratio=self.mask_pos_x_ratio,
+                mask_pos_y_ratio=self.mask_pos_y_ratio,
+                sub_pos_x_ratio=self.sub_pos_x_ratio,
+                sub_pos_y_ratio=self.sub_pos_y_ratio,
             )
 
         is_video_filtered = bool(v_filter_str and v_out_label not in ("[0:v]", "0:v:0"))
@@ -501,7 +566,7 @@ class DubbingMixerWorker(QThread):
                 audio_filter = (
                     "[0:a:0]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=0.18[bg_a];"
                     "[1:a:0]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=1.25[dubbed_a];"
-                    "[bg_a][dubbed_a]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,alimiter=limit=0.98:attack=5:release=50[outa]"
+                    "[bg_a][dubbed_a]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,alimiter=limit=0.96:attack=7:release=120[outa]"
                 )
                 if is_video_filtered:
                     combined_filter = f"{v_filter_str};{audio_filter}"
